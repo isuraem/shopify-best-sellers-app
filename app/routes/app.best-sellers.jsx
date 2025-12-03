@@ -15,7 +15,7 @@ export const loader = async ({ request }) => {
     // Get date range from URL parameters or use defaults
     const url = new URL(request.url);
     const monthsParam = url.searchParams.get("months");
-    const months = monthsParam ? parseInt(monthsParam) : 12; // Default 12 months
+    const months = monthsParam ? parseInt(monthsParam) : 1; // Default 12 months
 
     // Define date range based on months parameter
     const endDate = new Date();
@@ -303,7 +303,7 @@ export const loader = async ({ request }) => {
       products: [],
       collections: [],
       collectionName: null,
-      selectedMonths: 12,
+      selectedMonths: 1,
       bestSellersCollectionId: null,
       totalOrdersProcessed: 0,
       error: `Critical error: ${outerError.message}`,
@@ -469,7 +469,7 @@ export default function BestSellers() {
   const [showModal, setShowModal] = useState(false);
   const [selectedCollection, setSelectedCollection] = useState(bestSellersCollectionId || "");
   const [assignmentMode, setAssignmentMode] = useState("add");
-  const [months, setMonths] = useState(selectedMonths || 12);
+  const [months, setMonths] = useState(selectedMonths || 1);
 
   const isLoading = navigation.state === "loading";
 
@@ -596,8 +596,6 @@ export default function BestSellers() {
               <option value="3">Last 3 months</option>
               <option value="6">Last 6 months</option>
               <option value="12">Last 12 months</option>
-              <option value="24">Last 24 months</option>
-              <option value="36">Last 36 months</option>
             </select>
           </label>
           {isLoading && (
