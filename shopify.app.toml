@@ -2,7 +2,7 @@
 
 client_id = "86539391acd87d803b3eef4385ff4bab"
 name = "re-tag best sellers"
-application_url = "https://example.com"
+application_url = "https://shopify-best-sellers-app-production.up.railway.app"
 embedded = true
 
 [build]
@@ -24,7 +24,7 @@ api_version = "2026-01"
 scopes = "read_products,read_orders,read_all_orders, write_products"
 use_legacy_install_flow = false
 [auth]
-redirect_urls = [ "https://example.com/api/auth" ]
+redirect_urls = [ "https://shopify-best-sellers-app-production.up.railway.app/api/auth" ]
 
 [access_scopes.protected_customer_data]
 # Declare why you need access to orders

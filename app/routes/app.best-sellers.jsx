@@ -3,7 +3,7 @@
 // ============================================
 
 import { useState, useEffect } from "react"; 
-import { useLoaderData, useFetcher } from "react-router";
+import { useLoaderData, useFetcher, useNavigation } from "react-router";
 import { authenticate } from "../shopify.server";
 
 export const loader = async ({ request }) => {
@@ -12,16 +12,18 @@ export const loader = async ({ request }) => {
 
     console.log("Fetching top-selling products by sold units...");
 
-    // Define date range - adjust months as needed for historical data
+    // Get date range from URL parameters or use defaults
+    const url = new URL(request.url);
+    const monthsParam = url.searchParams.get("months");
+    const months = monthsParam ? parseInt(monthsParam) : 12; // Default 12 months
+
+    // Define date range based on months parameter
     const endDate = new Date();
     const startDate = new Date();
-    startDate.setMonth(startDate.getMonth() - 12); // Last 12 months
+    startDate.setMonth(startDate.getMonth() - months);
     
     const dateQuery = `processed_at:>='${startDate.toISOString().split('T')[0]}'`;
-    console.log(`Fetching orders from ${startDate.toISOString().split('T')[0]} to ${endDate.toISOString().split('T')[0]}`);
-
-    // How many orders to inspect for sales data
-    const MAX_ORDERS = 10000;
+    console.log(`Fetching orders from ${startDate.toISOString().split('T')[0]} to ${endDate.toISOString().split('T')[0]} (${months} months)`);
 
     let cursor = null;
     let fetchedOrders = 0;
@@ -31,7 +33,6 @@ export const loader = async ({ request }) => {
     const productStats = new Map();
 
     // REDUCED BATCH SIZE: 100 orders per query to stay under cost limit
-    // Cost calculation: ~10 points per order with line items
     const ORDERS_QUERY = `#graphql
       query getOrdersForTopSellers($cursor: String, $query: String) {
         orders(
@@ -83,6 +84,7 @@ export const loader = async ({ request }) => {
       }
     `;
 
+    // Updated query to include ruleSet to identify smart collections
     const COLLECTIONS_QUERY = `#graphql
       query getCollections {
         collections(first: 250) {
@@ -90,6 +92,11 @@ export const loader = async ({ request }) => {
             node {
               id
               title
+              ruleSet {
+                rules {
+                  column
+                }
+              }
             }
           }
         }
@@ -107,14 +114,26 @@ export const loader = async ({ request }) => {
         throw new Error("Failed to fetch collections");
       }
       
-      const collections = collectionsJson.data?.collections?.edges?.map(e => ({
+      // Filter out smart collections (collections with rules)
+      const allCollections = collectionsJson.data?.collections?.edges?.map(e => ({
         id: e.node.id,
-        title: e.node.title
+        title: e.node.title,
+        isSmart: e.node.ruleSet && e.node.ruleSet.rules && e.node.ruleSet.rules.length > 0
       })) || [];
 
-      console.log(`Fetched ${collections.length} collections`);
+      // Only manual collections can have products added
+      const manualCollections = allCollections.filter(c => !c.isSmart);
 
-      while (hasNextPage && fetchedOrders < MAX_ORDERS) {
+      // Find "Best Sellers" manual collection
+      const bestSellersCollection = manualCollections.find(c => 
+        c.title.toLowerCase() === "best sellers" || 
+        c.title.toLowerCase() === "bestsellers"
+      );
+
+      console.log(`Fetched ${allCollections.length} total collections (${manualCollections.length} manual, ${allCollections.length - manualCollections.length} smart)`);
+
+      // Fetch all orders within date range (no MAX_ORDERS limit)
+      while (hasNextPage) {
         console.log(`Fetching orders page... (total so far: ${fetchedOrders})`);
         
         const response = await admin.graphql(ORDERS_QUERY, {
@@ -130,8 +149,10 @@ export const loader = async ({ request }) => {
           console.error("GraphQL errors:", json.errors);
           return {
             products: [],
-            collections: [],
+            collections: manualCollections,
             collectionName: null,
+            selectedMonths: months,
+            bestSellersCollectionId: bestSellersCollection?.id || null,
             error: `GraphQL error: ${json.errors[0].message}`,
           };
         }
@@ -140,10 +161,11 @@ export const loader = async ({ request }) => {
           console.error("Failed to fetch orders - no data returned", JSON.stringify(json, null, 2));
           return {
             products: [],
-            collections: [],
+            collections: manualCollections,
             collectionName: null,
-            error:
-              "Failed to fetch orders for analytics. Check app scopes (read_orders / read_all_orders).",
+            selectedMonths: months,
+            bestSellersCollectionId: bestSellersCollection?.id || null,
+            error: "Failed to fetch orders for analytics. Check app scopes (read_orders / read_all_orders).",
           };
         }
 
@@ -218,7 +240,7 @@ export const loader = async ({ request }) => {
 
         console.log(`hasNextPage: ${hasNextPage}, cursor: ${cursor ? 'present' : 'null'}`);
 
-        // Add a small delay to avoid hitting rate limits (optional but recommended)
+        // Add a small delay to avoid hitting rate limits
         if (hasNextPage) {
           await new Promise(resolve => setTimeout(resolve, 100));
         }
@@ -241,8 +263,7 @@ export const loader = async ({ request }) => {
       );
 
       let error = null;
-      const monthsBack = Math.round((endDate - startDate) / (1000 * 60 * 60 * 24 * 30));
-      let collectionName = `All orders - Last ${monthsBack} months (top sellers by units sold)`;
+      let collectionName = `All orders - Last ${months} months (top sellers by units sold)`;
 
       if (fetchedOrders === 0) {
         error =
@@ -255,8 +276,10 @@ export const loader = async ({ request }) => {
 
       return {
         products: productsArray,
-        collections,
+        collections: manualCollections,
         collectionName,
+        selectedMonths: months,
+        bestSellersCollectionId: bestSellersCollection?.id || null,
         error,
       };
     } catch (innerError) {
@@ -266,6 +289,8 @@ export const loader = async ({ request }) => {
         products: [],
         collections: [],
         collectionName: null,
+        selectedMonths: months,
+        bestSellersCollectionId: null,
         error: `Error computing top sellers: ${innerError.message}`,
       };
     }
@@ -276,6 +301,8 @@ export const loader = async ({ request }) => {
       products: [],
       collections: [],
       collectionName: null,
+      selectedMonths: 12,
+      bestSellersCollectionId: null,
       error: `Critical error: ${outerError.message}`,
     };
   }
@@ -286,9 +313,8 @@ export const action = async ({ request }) => {
   const formData = await request.formData();
   const productIds = JSON.parse(formData.get("productIds"));
   const collectionId = formData.get("collectionId");
-  const assignmentMode = formData.get("assignmentMode"); // "add" or "replace"
+  const assignmentMode = formData.get("assignmentMode");
 
-  // First, get current products in the collection
   const GET_COLLECTION_QUERY = `#graphql
     query getCollectionProducts($id: ID!) {
       collection(id: $id) {
@@ -335,7 +361,6 @@ export const action = async ({ request }) => {
   `;
 
   try {
-    // Get existing products in collection
     const collectionResponse = await admin.graphql(GET_COLLECTION_QUERY, {
       variables: { id: collectionId },
     });
@@ -346,7 +371,6 @@ export const action = async ({ request }) => {
     const existingProductIdsSet = new Set(existingProductIds);
 
     if (assignmentMode === "replace") {
-      // Remove all existing products first
       if (existingProductIds.length > 0) {
         const removeResponse = await admin.graphql(REMOVE_PRODUCTS_MUTATION, {
           variables: {
@@ -365,7 +389,6 @@ export const action = async ({ request }) => {
         }
       }
 
-      // Add new products
       const response = await admin.graphql(ADD_PRODUCTS_MUTATION, {
         variables: {
           id: collectionId,
@@ -387,7 +410,6 @@ export const action = async ({ request }) => {
         message: `Successfully replaced collection with ${productIds.length} product(s) (removed ${existingProductIds.length} existing)`,
       };
     } else {
-      // Add mode - skip products already in collection
       const productsToAdd = productIds.filter(id => !existingProductIdsSet.has(id));
       
       const skippedCount = productIds.length - productsToAdd.length;
@@ -399,7 +421,6 @@ export const action = async ({ request }) => {
         };
       }
 
-      // Add only the products that aren't already in the collection
       const response = await admin.graphql(ADD_PRODUCTS_MUTATION, {
         variables: {
           id: collectionId,
@@ -436,13 +457,24 @@ export const action = async ({ request }) => {
 };
 
 export default function BestSellers() {
-  const { products, collections, collectionName, error } = useLoaderData();
+  const { products, collections, collectionName, selectedMonths, bestSellersCollectionId, error } = useLoaderData();
   const fetcher = useFetcher();
+  const navigation = useNavigation();
   
   const [selectedProducts, setSelectedProducts] = useState(new Set());
   const [showModal, setShowModal] = useState(false);
-  const [selectedCollection, setSelectedCollection] = useState("");
+  const [selectedCollection, setSelectedCollection] = useState(bestSellersCollectionId || "");
   const [assignmentMode, setAssignmentMode] = useState("add");
+  const [months, setMonths] = useState(selectedMonths || 12);
+
+  const isLoading = navigation.state === "loading";
+
+  // Update selected collection when bestSellersCollectionId changes
+  useEffect(() => {
+    if (bestSellersCollectionId && !selectedCollection) {
+      setSelectedCollection(bestSellersCollectionId);
+    }
+  }, [bestSellersCollectionId, selectedCollection]);
 
   const handleSelectAll = () => {
     if (selectedProducts.size === products.length) {
@@ -484,20 +516,27 @@ export default function BestSellers() {
     );
   };
 
+  const handleMonthsChange = (e) => {
+    const newMonths = e.target.value;
+    setMonths(newMonths);
+    // Navigate to same route with new months parameter
+    window.location.href = `/app/best-sellers?months=${newMonths}`;
+  };
+
   useEffect(() => {
     if (fetcher.state === "idle" && fetcher.data && showModal) {
       if (fetcher.data.success || fetcher.data.error) {
         const timer = setTimeout(() => {
           setShowModal(false);
           setSelectedProducts(new Set());
-          setSelectedCollection("");
+          setSelectedCollection(bestSellersCollectionId || "");
           setAssignmentMode("add");
         }, 2000);
         
         return () => clearTimeout(timer);
       }
     }
-  }, [fetcher.state, fetcher.data, showModal]);
+  }, [fetcher.state, fetcher.data, showModal, bestSellersCollectionId]);
 
   const allSelected = products.length > 0 && selectedProducts.size === products.length;
 
@@ -522,108 +561,167 @@ export default function BestSellers() {
           </s-box>
         )}
 
-        <s-box marginBottom="base" style={{ display: "flex", justifyContent: "space-between", alignItems: "center" }}>
-          <div>
-            <s-heading>
-              Showing Top <strong>{products.length}</strong> Products by Units Sold
-            </s-heading>
-            <s-text subdued>
-              Source: {collectionName || "N/A"} (ranked by total units sold from recent orders)
+        {/* Warning if no manual "Best Sellers" collection found */}
+        {!bestSellersCollectionId && collections.length > 0 && (
+          <s-box marginBottom="base">
+            <s-text tone="warning">
+              No manual "Best Sellers" collection found. Smart/automated collections can't have products manually added. 
+              Please create a manual collection named "Best Sellers" or select a different manual collection.
             </s-text>
-          </div>
-          
-          {selectedProducts.size > 0 && (
-            <s-button onClick={handleMoveToClick}>
-              Move to ({selectedProducts.size})
-            </s-button>
-          )}
+          </s-box>
+        )}
+
+        {/* Date Range Selector */}
+        <s-box marginBottom="base">
+          <label style={{ display: "flex", alignItems: "center", gap: "12px" }}>
+            <s-text><strong>Date Range:</strong></s-text>
+            <select
+              value={months}
+              onChange={handleMonthsChange}
+              disabled={isLoading}
+              style={{
+                padding: "8px 12px",
+                borderRadius: "4px",
+                border: "1px solid #ccc",
+                fontSize: "14px",
+                cursor: isLoading ? "not-allowed" : "pointer",
+                opacity: isLoading ? 0.6 : 1,
+              }}
+            >
+              <option value="1">Last 1 month</option>
+              <option value="3">Last 3 months</option>
+              <option value="6">Last 6 months</option>
+              <option value="12">Last 12 months</option>
+              <option value="24">Last 24 months</option>
+              <option value="36">Last 36 months</option>
+            </select>
+            {isLoading && (
+              <span style={{ display: "flex", alignItems: "center", gap: "8px" }}>
+                <s-spinner size="small" />
+                <s-text subdued>Loading products...</s-text>
+              </span>
+            )}
+          </label>
         </s-box>
 
-        <s-box
-          marginTop="base"
-          padding="base"
-          borderWidth="base"
-          borderRadius="base"
-          background="subdued"
-        >
-          <table style={{ width: "100%", borderCollapse: "collapse" }}>
-            <thead>
-              <tr>
-                <th style={{ textAlign: "left", padding: "8px" }}>
-                  <input
-                    type="checkbox"
-                    checked={allSelected}
-                    onChange={handleSelectAll}
-                    style={{ cursor: "pointer" }}
-                  />
-                </th>
-                <th style={{ textAlign: "left", padding: "8px" }}>Rank</th>
-                <th style={{ textAlign: "left", padding: "8px" }}>Image</th>
-                <th style={{ textAlign: "left", padding: "8px" }}>
-                  Product Name
-                </th>
-                <th style={{ textAlign: "left", padding: "8px" }}>
-                  Collections
-                </th>
-                <th style={{ textAlign: "left", padding: "8px" }}>
-                  Sold Units
-                </th>
-                <th style={{ textAlign: "left", padding: "8px" }}>
-                  Inventory
-                </th>
-              </tr>
-            </thead>
+        {/* Loading State */}
+        {isLoading && (
+          <s-box padding="large" style={{ textAlign: "center" }}>
+            <s-spinner size="large" />
+            <s-box marginTop="base">
+              <s-heading size="small">Loading Products...</s-heading>
+              <s-text subdued>Fetching order data from the last {months} months. This may take a minute.</s-text>
+            </s-box>
+          </s-box>
+        )}
 
-            <tbody>
-              {products.map((product) => (
-                <tr key={product.id}>
-                  <td style={{ padding: "8px" }}>
-                    <input
-                      type="checkbox"
-                      checked={selectedProducts.has(product.id)}
-                      onChange={() => handleSelectProduct(product.id)}
-                      style={{ cursor: "pointer" }}
-                    />
-                  </td>
-                  <td style={{ padding: "8px", fontWeight: "bold" }}>
-                    #{product.rank}
-                  </td>
-                  <td style={{ padding: "8px" }}>
-                    {product.imageUrl && (
-                      <img
-                        src={product.imageUrl}
-                        width="60"
-                        style={{ borderRadius: "6px" }}
-                        alt={product.title}
-                      />
-                    )}
-                  </td>
-                  <td style={{ padding: "8px" }}>{product.title}</td>
-                  <td style={{ padding: "8px" }}>
-                    {product.collections?.length
-                      ? product.collections.join(", ")
-                      : "No collection"}
-                  </td>
-                  <td style={{ padding: "8px" }}>{product.soldUnits}</td>
-                  <td style={{ padding: "8px" }}>
-                    {product.totalInventory ?? 0}
-                  </td>
-                </tr>
-              ))}
-
-              {products.length === 0 && (
-                <tr>
-                  <td
-                    colSpan={7}
-                    style={{ padding: "16px", textAlign: "center" }}
-                  >
-                    No sold products to display yet.
-                  </td>
-                </tr>
+        {/* Content (hidden when loading) */}
+        {!isLoading && (
+          <>
+            <s-box marginBottom="base" style={{ display: "flex", justifyContent: "space-between", alignItems: "center" }}>
+              <div>
+                <s-heading>
+                  Showing Top <strong>{products.length}</strong> Products by Units Sold
+                </s-heading>
+                <s-text subdued>
+                  Source: {collectionName || "N/A"} (ranked by total units sold from recent orders)
+                </s-text>
+              </div>
+              
+              {selectedProducts.size > 0 && (
+                <s-button onClick={handleMoveToClick}>
+                  Move to ({selectedProducts.size})
+                </s-button>
               )}
-            </tbody>
-          </table>
-        </s-box>
+            </s-box>
+
+            <s-box
+              marginTop="base"
+              padding="base"
+              borderWidth="base"
+              borderRadius="base"
+              background="subdued"
+            >
+              <table style={{ width: "100%", borderCollapse: "collapse" }}>
+                <thead>
+                  <tr>
+                    <th style={{ textAlign: "left", padding: "8px" }}>
+                      <input
+                        type="checkbox"
+                        checked={allSelected}
+                        onChange={handleSelectAll}
+                        style={{ cursor: "pointer" }}
+                      />
+                    </th>
+                    <th style={{ textAlign: "left", padding: "8px" }}>Rank</th>
+                    <th style={{ textAlign: "left", padding: "8px" }}>Image</th>
+                    <th style={{ textAlign: "left", padding: "8px" }}>
+                      Product Name
+                    </th>
+                    <th style={{ textAlign: "left", padding: "8px" }}>
+                      Collections
+                    </th>
+                    <th style={{ textAlign: "left", padding: "8px" }}>
+                      Sold Units
+                    </th>
+                    <th style={{ textAlign: "left", padding: "8px" }}>
+                      Inventory
+                    </th>
+                  </tr>
+                </thead>
+
+                <tbody>
+                  {products.map((product) => (
+                    <tr key={product.id}>
+                      <td style={{ padding: "8px" }}>
+                        <input
+                          type="checkbox"
+                          checked={selectedProducts.has(product.id)}
+                          onChange={() => handleSelectProduct(product.id)}
+                          style={{ cursor: "pointer" }}
+                        />
+                      </td>
+                      <td style={{ padding: "8px", fontWeight: "bold" }}>
+                        #{product.rank}
+                      </td>
+                      <td style={{ padding: "8px" }}>
+                        {product.imageUrl && (
+                          <img
+                            src={product.imageUrl}
+                            width="60"
+                            style={{ borderRadius: "6px" }}
+                            alt={product.title}
+                          />
+                        )}
+                      </td>
+                      <td style={{ padding: "8px" }}>{product.title}</td>
+                      <td style={{ padding: "8px" }}>
+                        {product.collections?.length
+                          ? product.collections.join(", ")
+                          : "No collection"}
+                      </td>
+                      <td style={{ padding: "8px" }}>{product.soldUnits}</td>
+                      <td style={{ padding: "8px" }}>
+                        {product.totalInventory ?? 0}
+                      </td>
+                    </tr>
+                  ))}
+
+                  {products.length === 0 && (
+                    <tr>
+                      <td
+                        colSpan={7}
+                        style={{ padding: "16px", textAlign: "center" }}
+                      >
+                        No sold products to display yet.
+                      </td>
+                    </tr>
+                  )}
+                </tbody>
+              </table>
+            </s-box>
+          </>
+        )}
       </s-section>
 
       {/* Modal */}
@@ -663,7 +761,7 @@ export default function BestSellers() {
 
             <s-box marginTop="base" marginBottom="base">
               <label style={{ display: "block", marginBottom: "8px" }}>
-                <s-text>Select Collection:</s-text>
+                <s-text>Select Collection (Manual Collections Only):</s-text>
               </label>
               <select
                 value={selectedCollection}
@@ -682,6 +780,13 @@ export default function BestSellers() {
                   </option>
                 ))}
               </select>
+              {collections.length === 0 && (
+                <s-box marginTop="small">
+                  <s-text tone="critical" size="small">
+                    No manual collections available. Smart collections cannot have products manually added.
+                  </s-text>
+                </s-box>
+              )}
             </s-box>
 
             <s-box marginTop="base" marginBottom="base">
@@ -703,7 +808,7 @@ export default function BestSellers() {
                     <s-text><strong>Add to existing</strong></s-text>
                     <br />
                     <s-text subdued style={{ fontSize: "13px" }}>
-                      Keep current products and add selected ones (skip duplicates)
+                      Add these products to Collection
                     </s-text>
                   </div>
                 </label>
@@ -721,7 +826,7 @@ export default function BestSellers() {
                     <s-text><strong>Replace all</strong></s-text>
                     <br />
                     <s-text subdued style={{ fontSize: "13px" }}>
-                      Remove all current products and add only selected ones
+                      Replace all product in Collection
                     </s-text>
                   </div>
                 </label>
@@ -738,7 +843,7 @@ export default function BestSellers() {
               <s-button
                 primary
                 onClick={handleAssignCollection}
-                disabled={!selectedCollection || fetcher.state === "submitting"}
+                disabled={!selectedCollection || fetcher.state === "submitting" || collections.length === 0}
               >
                 {fetcher.state === "submitting" ? "Assigning..." : "Continue"}
               </s-button>
