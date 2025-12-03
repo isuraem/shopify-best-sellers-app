@@ -3,7 +3,7 @@
 // ============================================
 
 import { useState, useEffect } from "react"; 
-import { useLoaderData, useFetcher, useNavigation } from "react-router";
+import { useLoaderData, useFetcher, useNavigation, useNavigate } from "react-router"; // ✅ Add useNavigate
 import { authenticate } from "../shopify.server";
 
 export const loader = async ({ request }) => {
@@ -36,7 +36,7 @@ export const loader = async ({ request }) => {
     const ORDERS_QUERY = `#graphql
       query getOrdersForTopSellers($cursor: String, $query: String) {
         orders(
-          first: 100
+          first: 250
           after: $cursor
           sortKey: PROCESSED_AT
           reverse: true
@@ -134,7 +134,7 @@ export const loader = async ({ request }) => {
 
       // Fetch all orders within date range (no MAX_ORDERS limit)
       while (hasNextPage) {
-        console.log(`Fetching orders page... (total so far: ${fetchedOrders})`);
+        console.log(`📦 Fetching orders page... (total so far: ${fetchedOrders})`);
         
         const response = await admin.graphql(ORDERS_QUERY, {
           variables: { 
@@ -173,13 +173,13 @@ export const loader = async ({ request }) => {
         fetchedOrders += orders.length;
 
         console.log(
-          `Fetched ${orders.length} orders in this page, total so far: ${fetchedOrders}`
+          `✅ Fetched ${orders.length} orders in this page, total so far: ${fetchedOrders}`
         );
 
         // Log the date of the last order in this batch for debugging
         if (orders.length > 0) {
           const lastOrderDate = orders[orders.length - 1].node.processedAt;
-          console.log(`Last order in this batch: ${lastOrderDate}`);
+          console.log(`📅 Last order in this batch: ${lastOrderDate}`);
         }
 
         for (const orderEdge of orders) {
@@ -238,15 +238,15 @@ export const loader = async ({ request }) => {
         hasNextPage = json.data.orders.pageInfo.hasNextPage;
         cursor = json.data.orders.pageInfo.endCursor || null;
 
-        console.log(`hasNextPage: ${hasNextPage}, cursor: ${cursor ? 'present' : 'null'}`);
+        console.log(`🔄 hasNextPage: ${hasNextPage}, cursor: ${cursor ? 'present' : 'null'}`);
 
         // Add a small delay to avoid hitting rate limits
         if (hasNextPage) {
-          await new Promise(resolve => setTimeout(resolve, 100));
+          await new Promise(resolve => setTimeout(resolve, 50)); // Reduced from 100ms to 50ms
         }
       }
 
-      console.log(`FINAL: Fetched ${fetchedOrders} orders total`);
+      console.log(`🎉 FINAL: Fetched ${fetchedOrders} orders total`);
 
       // Turn the map into a sorted array, desc by soldUnits
       const productsArray = Array.from(productStats.values())
@@ -259,7 +259,7 @@ export const loader = async ({ request }) => {
         }));
 
       console.log(
-        `Computed ${productsArray.length} products, sorted by sold units from orders`
+        `✨ Computed ${productsArray.length} products, sorted by sold units from orders`
       );
 
       let error = null;
@@ -280,6 +280,7 @@ export const loader = async ({ request }) => {
         collectionName,
         selectedMonths: months,
         bestSellersCollectionId: bestSellersCollection?.id || null,
+        totalOrdersProcessed: fetchedOrders,
         error,
       };
     } catch (innerError) {
@@ -291,6 +292,7 @@ export const loader = async ({ request }) => {
         collectionName: null,
         selectedMonths: months,
         bestSellersCollectionId: null,
+        totalOrdersProcessed: 0,
         error: `Error computing top sellers: ${innerError.message}`,
       };
     }
@@ -303,6 +305,7 @@ export const loader = async ({ request }) => {
       collectionName: null,
       selectedMonths: 12,
       bestSellersCollectionId: null,
+      totalOrdersProcessed: 0,
       error: `Critical error: ${outerError.message}`,
     };
   }
@@ -457,9 +460,10 @@ export const action = async ({ request }) => {
 };
 
 export default function BestSellers() {
-  const { products, collections, collectionName, selectedMonths, bestSellersCollectionId, error } = useLoaderData();
+  const { products, collections, collectionName, selectedMonths, bestSellersCollectionId, totalOrdersProcessed, error } = useLoaderData();
   const fetcher = useFetcher();
   const navigation = useNavigation();
+    const navigate = useNavigate();
   
   const [selectedProducts, setSelectedProducts] = useState(new Set());
   const [showModal, setShowModal] = useState(false);
@@ -516,11 +520,11 @@ export default function BestSellers() {
     );
   };
 
-  const handleMonthsChange = (e) => {
+   const handleMonthsChange = (e) => {
     const newMonths = e.target.value;
     setMonths(newMonths);
-    // Navigate to same route with new months parameter
-    window.location.href = `/app/best-sellers?months=${newMonths}`;
+    // Navigate using React Router - keeps auth state
+    navigate(`/app/best-sellers?months=${newMonths}`); // ✅ GOOD - uses React Router
   };
 
   useEffect(() => {
@@ -562,7 +566,7 @@ export default function BestSellers() {
         )}
 
         {/* Warning if no manual "Best Sellers" collection found */}
-        {!bestSellersCollectionId && collections.length > 0 && (
+        {!bestSellersCollectionId && collections.length > 0 && !isLoading && (
           <s-box marginBottom="base">
             <s-text tone="warning">
               No manual "Best Sellers" collection found. Smart/automated collections can't have products manually added. 
@@ -572,7 +576,7 @@ export default function BestSellers() {
         )}
 
         {/* Date Range Selector */}
-        <s-box marginBottom="base">
+        <s-box marginBottom="base" style={{ display: "flex", alignItems: "center", gap: "16px" }}>
           <label style={{ display: "flex", alignItems: "center", gap: "12px" }}>
             <s-text><strong>Date Range:</strong></s-text>
             <select
@@ -595,36 +599,43 @@ export default function BestSellers() {
               <option value="24">Last 24 months</option>
               <option value="36">Last 36 months</option>
             </select>
-            {isLoading && (
-              <span style={{ display: "flex", alignItems: "center", gap: "8px" }}>
-                <s-spinner size="small" />
-                <s-text subdued>Loading products...</s-text>
-              </span>
-            )}
           </label>
+          {isLoading && (
+            <div style={{ display: "flex", alignItems: "center", gap: "8px" }}>
+              <s-spinner size="small" />
+              <s-text subdued><strong>Loading products...</strong> This may take 1-2 minutes for large stores.</s-text>
+            </div>
+          )}
         </s-box>
 
         {/* Loading State */}
-        {isLoading && (
-          <s-box padding="large" style={{ textAlign: "center" }}>
+        {isLoading ? (
+          <s-box padding="extraLarge" style={{ textAlign: "center", backgroundColor: "#f9fafb", borderRadius: "8px" }}>
             <s-spinner size="large" />
             <s-box marginTop="base">
-              <s-heading size="small">Loading Products...</s-heading>
-              <s-text subdued>Fetching order data from the last {months} months. This may take a minute.</s-text>
+              <s-heading size="medium">Loading Products...</s-heading>
+              <s-box marginTop="small">
+                <s-text subdued>
+                  Analyzing order data from the last {months} months to rank your best sellers.
+                </s-text>
+              </s-box>
+              <s-box marginTop="small">
+                <s-text subdued size="small">
+                  ⏳ This process may take 1-3 minutes depending on your order volume.
+                </s-text>
+              </s-box>
             </s-box>
           </s-box>
-        )}
-
-        {/* Content (hidden when loading) */}
-        {!isLoading && (
+        ) : (
           <>
+            {/* Content */}
             <s-box marginBottom="base" style={{ display: "flex", justifyContent: "space-between", alignItems: "center" }}>
               <div>
                 <s-heading>
                   Showing Top <strong>{products.length}</strong> Products by Units Sold
                 </s-heading>
                 <s-text subdued>
-                  Source: {collectionName || "N/A"} (ranked by total units sold from recent orders)
+                  {collectionName || "N/A"} • Analyzed {totalOrdersProcessed || 0} orders
                 </s-text>
               </div>
               
@@ -808,7 +819,7 @@ export default function BestSellers() {
                     <s-text><strong>Add to existing</strong></s-text>
                     <br />
                     <s-text subdued style={{ fontSize: "13px" }}>
-                      Add these products to Collection
+                      Add these products to Best Sellers Collection
                     </s-text>
                   </div>
                 </label>
@@ -826,7 +837,7 @@ export default function BestSellers() {
                     <s-text><strong>Replace all</strong></s-text>
                     <br />
                     <s-text subdued style={{ fontSize: "13px" }}>
-                      Replace all product in Collection
+                      Replace all products in Best Sellers Collection
                     </s-text>
                   </div>
                 </label>
