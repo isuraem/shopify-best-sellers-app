@@ -15,15 +15,37 @@ export const loader = async ({ request }) => {
     // Get date range from URL parameters or use defaults
     const url = new URL(request.url);
     const monthsParam = url.searchParams.get("months");
-    const months = monthsParam ? parseInt(monthsParam) : 1; // Default 12 months
+    const weeksParam = url.searchParams.get("weeks");
+    
+    // ✅ Support both months and weeks
+    let months = 0;
+    let weeks = 0;
+    let dateRangeLabel = "";
+    
+    if (weeksParam) {
+      weeks = parseInt(weeksParam);
+      dateRangeLabel = `${weeks} week${weeks > 1 ? 's' : ''}`;
+    } else if (monthsParam) {
+      months = parseInt(monthsParam);
+      dateRangeLabel = `${months} month${months > 1 ? 's' : ''}`;
+    } else {
+      // Default: 1 week for fastest loading
+      weeks = 1;
+      dateRangeLabel = "1 week";
+    }
 
-    // Define date range based on months parameter
+    // Define date range
     const endDate = new Date();
     const startDate = new Date();
-    startDate.setMonth(startDate.getMonth() - months);
+    
+    if (weeks > 0) {
+      startDate.setDate(startDate.getDate() - (weeks * 7));
+    } else if (months > 0) {
+      startDate.setMonth(startDate.getMonth() - months);
+    }
     
     const dateQuery = `processed_at:>='${startDate.toISOString().split('T')[0]}'`;
-    console.log(`Fetching orders from ${startDate.toISOString().split('T')[0]} to ${endDate.toISOString().split('T')[0]} (${months} months)`);
+    console.log(`Fetching orders from ${startDate.toISOString().split('T')[0]} to ${endDate.toISOString().split('T')[0]} (${dateRangeLabel})`);
 
     let cursor = null;
     let fetchedOrders = 0;
@@ -32,7 +54,6 @@ export const loader = async ({ request }) => {
     // Map of productId -> aggregated stats
     const productStats = new Map();
 
-    // REDUCED BATCH SIZE: 100 orders per query to stay under cost limit
     const ORDERS_QUERY = `#graphql
       query getOrdersForTopSellers($cursor: String, $query: String) {
         orders(
@@ -84,7 +105,6 @@ export const loader = async ({ request }) => {
       }
     `;
 
-    // Updated query to include ruleSet to identify smart collections
     const COLLECTIONS_QUERY = `#graphql
       query getCollections {
         collections(first: 250) {
@@ -114,17 +134,14 @@ export const loader = async ({ request }) => {
         throw new Error("Failed to fetch collections");
       }
       
-      // Filter out smart collections (collections with rules)
       const allCollections = collectionsJson.data?.collections?.edges?.map(e => ({
         id: e.node.id,
         title: e.node.title,
         isSmart: e.node.ruleSet && e.node.ruleSet.rules && e.node.ruleSet.rules.length > 0
       })) || [];
 
-      // Only manual collections can have products added
       const manualCollections = allCollections.filter(c => !c.isSmart);
 
-      // Find "Best Sellers" manual collection
       const bestSellersCollection = manualCollections.find(c => 
         c.title.toLowerCase() === "best sellers" || 
         c.title.toLowerCase() === "bestsellers"
@@ -132,7 +149,7 @@ export const loader = async ({ request }) => {
 
       console.log(`Fetched ${allCollections.length} total collections (${manualCollections.length} manual, ${allCollections.length - manualCollections.length} smart)`);
 
-      // Fetch all orders within date range (no MAX_ORDERS limit)
+      // Fetch all orders within date range
       while (hasNextPage) {
         console.log(`📦 Fetching orders page... (total so far: ${fetchedOrders})`);
         
@@ -151,20 +168,24 @@ export const loader = async ({ request }) => {
             products: [],
             collections: manualCollections,
             collectionName: null,
-            selectedMonths: months,
+            selectedRange: { weeks, months },
+            dateRangeLabel,
             bestSellersCollectionId: bestSellersCollection?.id || null,
+            totalOrdersProcessed: 0,
             error: `GraphQL error: ${json.errors[0].message}`,
           };
         }
 
         if (!json.data?.orders) {
-          console.error("Failed to fetch orders - no data returned", JSON.stringify(json, null, 2));
+          console.error("Failed to fetch orders - no data returned");
           return {
             products: [],
             collections: manualCollections,
             collectionName: null,
-            selectedMonths: months,
+            selectedRange: { weeks, months },
+            dateRangeLabel,
             bestSellersCollectionId: bestSellersCollection?.id || null,
+            totalOrdersProcessed: 0,
             error: "Failed to fetch orders for analytics. Check app scopes (read_orders / read_all_orders).",
           };
         }
@@ -172,11 +193,8 @@ export const loader = async ({ request }) => {
         const orders = json.data.orders.edges;
         fetchedOrders += orders.length;
 
-        console.log(
-          `✅ Fetched ${orders.length} orders in this page, total so far: ${fetchedOrders}`
-        );
+        console.log(`✅ Fetched ${orders.length} orders in this page, total so far: ${fetchedOrders}`);
 
-        // Log the date of the last order in this batch for debugging
         if (orders.length > 0) {
           const lastOrderDate = orders[orders.length - 1].node.processedAt;
           console.log(`📅 Last order in this batch: ${lastOrderDate}`);
@@ -191,12 +209,10 @@ export const loader = async ({ request }) => {
             const line = lineEdge.node;
             const quantity = line.quantity || 0;
 
-            // Skip zero-qty lines
             if (quantity <= 0) continue;
 
             const product = line.product;
 
-            // If the product still exists, aggregate by product.id
             if (product) {
               const pid = product.id;
 
@@ -215,7 +231,6 @@ export const loader = async ({ request }) => {
               const entry = productStats.get(pid);
               entry.soldUnits += quantity;
             } else {
-              // Product might have been deleted, but we can still track it by line item
               const fallbackId = `line-${line.id}`;
 
               if (!productStats.has(fallbackId)) {
@@ -240,15 +255,13 @@ export const loader = async ({ request }) => {
 
         console.log(`🔄 hasNextPage: ${hasNextPage}, cursor: ${cursor ? 'present' : 'null'}`);
 
-        // Add a small delay to avoid hitting rate limits
         if (hasNextPage) {
-          await new Promise(resolve => setTimeout(resolve, 50)); // Reduced from 100ms to 50ms
+          await new Promise(resolve => setTimeout(resolve, 50));
         }
       }
 
       console.log(`🎉 FINAL: Fetched ${fetchedOrders} orders total`);
 
-      // Turn the map into a sorted array, desc by soldUnits
       const productsArray = Array.from(productStats.values())
         .filter((p) => p.soldUnits > 0)
         .sort((a, b) => b.soldUnits - a.soldUnits)
@@ -258,27 +271,24 @@ export const loader = async ({ request }) => {
           rank: index + 1,
         }));
 
-      console.log(
-        `✨ Computed ${productsArray.length} products, sorted by sold units from orders`
-      );
+      console.log(`✨ Computed ${productsArray.length} products, sorted by sold units from orders`);
 
       let error = null;
-      let collectionName = `All orders - Last ${months} months (top sellers by units sold)`;
+      let collectionName = `All orders - Last ${dateRangeLabel} (top sellers by units sold)`;
 
       if (fetchedOrders === 0) {
-        error =
-          "No orders were found. Make sure your app has read_orders permission and your store has orders.";
+        error = "No orders were found. Make sure your app has read_orders permission and your store has orders.";
         collectionName = null;
       } else if (productsArray.length === 0) {
-        error =
-          "Orders were found, but no line items with quantity > 0 could be aggregated. This can happen if all items are non-product line items.";
+        error = "Orders were found, but no line items with quantity > 0 could be aggregated.";
       }
 
       return {
         products: productsArray,
         collections: manualCollections,
         collectionName,
-        selectedMonths: months,
+        selectedRange: { weeks, months },
+        dateRangeLabel,
         bestSellersCollectionId: bestSellersCollection?.id || null,
         totalOrdersProcessed: fetchedOrders,
         error,
@@ -290,7 +300,8 @@ export const loader = async ({ request }) => {
         products: [],
         collections: [],
         collectionName: null,
-        selectedMonths: months,
+        selectedRange: { weeks: 1, months: 0 },
+        dateRangeLabel: "1 week",
         bestSellersCollectionId: null,
         totalOrdersProcessed: 0,
         error: `Error computing top sellers: ${innerError.message}`,
@@ -303,13 +314,16 @@ export const loader = async ({ request }) => {
       products: [],
       collections: [],
       collectionName: null,
-      selectedMonths: 1,
+      selectedRange: { weeks: 1, months: 0 },
+      dateRangeLabel: "1 week",
       bestSellersCollectionId: null,
       totalOrdersProcessed: 0,
       error: `Critical error: ${outerError.message}`,
     };
   }
 };
+
+// ... action stays the same ...
 
 export const action = async ({ request }) => {
   const { admin } = await authenticate.admin(request);
@@ -460,20 +474,21 @@ export const action = async ({ request }) => {
 };
 
 export default function BestSellers() {
-  const { products, collections, collectionName, selectedMonths, bestSellersCollectionId, totalOrdersProcessed, error } = useLoaderData();
+  const { products, collections, collectionName, selectedRange, dateRangeLabel, bestSellersCollectionId, totalOrdersProcessed, error } = useLoaderData();
   const fetcher = useFetcher();
   const navigation = useNavigation();
-    const navigate = useNavigate();
+  const navigate = useNavigate();
   
   const [selectedProducts, setSelectedProducts] = useState(new Set());
   const [showModal, setShowModal] = useState(false);
   const [selectedCollection, setSelectedCollection] = useState(bestSellersCollectionId || "");
   const [assignmentMode, setAssignmentMode] = useState("add");
-  const [months, setMonths] = useState(selectedMonths || 1);
+  const [rangeValue, setRangeValue] = useState(
+    selectedRange?.weeks ? `weeks-${selectedRange.weeks}` : `months-${selectedRange?.months || 1}`
+  );
 
   const isLoading = navigation.state === "loading";
 
-  // Update selected collection when bestSellersCollectionId changes
   useEffect(() => {
     if (bestSellersCollectionId && !selectedCollection) {
       setSelectedCollection(bestSellersCollectionId);
@@ -520,11 +535,18 @@ export default function BestSellers() {
     );
   };
 
-   const handleMonthsChange = (e) => {
-    const newMonths = e.target.value;
-    setMonths(newMonths);
-    // Navigate using React Router - keeps auth state
-    navigate(`/app/best-sellers?months=${newMonths}`); // ✅ GOOD - uses React Router
+  const handleRangeChange = (e) => {
+    const value = e.target.value;
+    setRangeValue(value);
+    
+    // Parse the value format: "weeks-1" or "months-3"
+    const [type, amount] = value.split('-');
+    
+    if (type === 'weeks') {
+      navigate(`/app/best-sellers?weeks=${amount}`);
+    } else {
+      navigate(`/app/best-sellers?months=${amount}`);
+    }
   };
 
   useEffect(() => {
@@ -565,7 +587,6 @@ export default function BestSellers() {
           </s-box>
         )}
 
-        {/* Warning if no manual "Best Sellers" collection found */}
         {!bestSellersCollectionId && collections.length > 0 && !isLoading && (
           <s-box marginBottom="base">
             <s-text tone="warning">
@@ -580,8 +601,8 @@ export default function BestSellers() {
           <label style={{ display: "flex", alignItems: "center", gap: "12px" }}>
             <s-text><strong>Date Range:</strong></s-text>
             <select
-              value={months}
-              onChange={handleMonthsChange}
+              value={rangeValue}
+              onChange={handleRangeChange}
               disabled={isLoading}
               style={{
                 padding: "8px 12px",
@@ -592,10 +613,11 @@ export default function BestSellers() {
                 opacity: isLoading ? 0.6 : 1,
               }}
             >
-              <option value="1">Last 1 month</option>
-              <option value="3">Last 3 months</option>
-              <option value="6">Last 6 months</option>
-              <option value="12">Last 12 months</option>
+              <option value="weeks-1">Last 1 week ⚡ (Fastest)</option>
+              <option value="months-1">Last 1 month</option>
+              <option value="months-3">Last 3 months</option>
+              <option value="months-6">Last 6 months</option>
+              <option value="months-12">Last 12 months</option>
             </select>
           </label>
           {isLoading && (
@@ -614,7 +636,7 @@ export default function BestSellers() {
               <s-heading size="medium">Loading Products...</s-heading>
               <s-box marginTop="small">
                 <s-text subdued>
-                  Analyzing order data from the last {months} months to rank your best sellers.
+                  Analyzing order data from the last {dateRangeLabel} to rank your best sellers.
                 </s-text>
               </s-box>
               <s-box marginTop="small">
@@ -733,7 +755,7 @@ export default function BestSellers() {
         )}
       </s-section>
 
-      {/* Modal */}
+      {/* Modal - same as before */}
       {showModal && (
         <div
           style={{
