@@ -3,7 +3,7 @@
 // ============================================
 
 import { useState, useEffect } from "react"; 
-import { useLoaderData, useFetcher, useNavigation, useNavigate } from "react-router"; // ✅ Add useNavigate
+import { useLoaderData, useFetcher, useNavigation, useNavigate } from "react-router";
 import { authenticate } from "../shopify.server";
 
 export const loader = async ({ request }) => {
@@ -17,7 +17,6 @@ export const loader = async ({ request }) => {
     const monthsParam = url.searchParams.get("months");
     const weeksParam = url.searchParams.get("weeks");
     
-    // ✅ Support both months and weeks
     let months = 0;
     let weeks = 0;
     let dateRangeLabel = "";
@@ -29,7 +28,6 @@ export const loader = async ({ request }) => {
       months = parseInt(monthsParam);
       dateRangeLabel = `${months} month${months > 1 ? 's' : ''}`;
     } else {
-      // Default: 1 week for fastest loading
       weeks = 1;
       dateRangeLabel = "1 week";
     }
@@ -51,7 +49,6 @@ export const loader = async ({ request }) => {
     let fetchedOrders = 0;
     let hasNextPage = true;
 
-    // Map of productId -> aggregated stats
     const productStats = new Map();
 
     const ORDERS_QUERY = `#graphql
@@ -83,6 +80,7 @@ export const loader = async ({ request }) => {
                       id
                       title
                       totalInventory
+                      tags
                       images(first: 1) {
                         nodes {
                           url
@@ -105,50 +103,7 @@ export const loader = async ({ request }) => {
       }
     `;
 
-    const COLLECTIONS_QUERY = `#graphql
-      query getCollections {
-        collections(first: 250) {
-          edges {
-            node {
-              id
-              title
-              ruleSet {
-                rules {
-                  column
-                }
-              }
-            }
-          }
-        }
-      }
-    `;
-
     try {
-      // Fetch collections
-      console.log("Fetching collections...");
-      const collectionsResponse = await admin.graphql(COLLECTIONS_QUERY);
-      const collectionsJson = await collectionsResponse.json();
-      
-      if (collectionsJson.errors) {
-        console.error("GraphQL errors fetching collections:", collectionsJson.errors);
-        throw new Error("Failed to fetch collections");
-      }
-      
-      const allCollections = collectionsJson.data?.collections?.edges?.map(e => ({
-        id: e.node.id,
-        title: e.node.title,
-        isSmart: e.node.ruleSet && e.node.ruleSet.rules && e.node.ruleSet.rules.length > 0
-      })) || [];
-
-      const manualCollections = allCollections.filter(c => !c.isSmart);
-
-      const bestSellersCollection = manualCollections.find(c => 
-        c.title.toLowerCase() === "best sellers" || 
-        c.title.toLowerCase() === "bestsellers"
-      );
-
-      console.log(`Fetched ${allCollections.length} total collections (${manualCollections.length} manual, ${allCollections.length - manualCollections.length} smart)`);
-
       // Fetch all orders within date range
       while (hasNextPage) {
         console.log(`📦 Fetching orders page... (total so far: ${fetchedOrders})`);
@@ -166,11 +121,9 @@ export const loader = async ({ request }) => {
           console.error("GraphQL errors:", json.errors);
           return {
             products: [],
-            collections: manualCollections,
             collectionName: null,
             selectedRange: { weeks, months },
             dateRangeLabel,
-            bestSellersCollectionId: bestSellersCollection?.id || null,
             totalOrdersProcessed: 0,
             error: `GraphQL error: ${json.errors[0].message}`,
           };
@@ -180,11 +133,9 @@ export const loader = async ({ request }) => {
           console.error("Failed to fetch orders - no data returned");
           return {
             products: [],
-            collections: manualCollections,
             collectionName: null,
             selectedRange: { weeks, months },
             dateRangeLabel,
-            bestSellersCollectionId: bestSellersCollection?.id || null,
             totalOrdersProcessed: 0,
             error: "Failed to fetch orders for analytics. Check app scopes (read_orders / read_all_orders).",
           };
@@ -222,6 +173,7 @@ export const loader = async ({ request }) => {
                   title: product.title,
                   totalInventory: product.totalInventory,
                   imageUrl: product.images?.nodes?.[0]?.url || null,
+                  tags: product.tags || [],
                   collections:
                     product.collections?.edges?.map((e) => e.node.title) || [],
                   soldUnits: 0,
@@ -239,6 +191,7 @@ export const loader = async ({ request }) => {
                   title: line.name || line.sku || "Unknown product",
                   totalInventory: null,
                   imageUrl: null,
+                  tags: [],
                   collections: [],
                   soldUnits: 0,
                 });
@@ -285,11 +238,9 @@ export const loader = async ({ request }) => {
 
       return {
         products: productsArray,
-        collections: manualCollections,
         collectionName,
         selectedRange: { weeks, months },
         dateRangeLabel,
-        bestSellersCollectionId: bestSellersCollection?.id || null,
         totalOrdersProcessed: fetchedOrders,
         error,
       };
@@ -298,11 +249,9 @@ export const loader = async ({ request }) => {
       console.error("Error stack:", innerError.stack);
       return {
         products: [],
-        collections: [],
         collectionName: null,
         selectedRange: { weeks: 1, months: 0 },
         dateRangeLabel: "1 week",
-        bestSellersCollectionId: null,
         totalOrdersProcessed: 0,
         error: `Error computing top sellers: ${innerError.message}`,
       };
@@ -312,62 +261,48 @@ export const loader = async ({ request }) => {
     console.error("Error stack:", outerError.stack);
     return {
       products: [],
-      collections: [],
       collectionName: null,
       selectedRange: { weeks: 1, months: 0 },
       dateRangeLabel: "1 week",
-      bestSellersCollectionId: null,
       totalOrdersProcessed: 0,
       error: `Critical error: ${outerError.message}`,
     };
   }
 };
 
-// ... action stays the same ...
-
 export const action = async ({ request }) => {
   const { admin } = await authenticate.admin(request);
   const formData = await request.formData();
   const productIds = JSON.parse(formData.get("productIds"));
-  const collectionId = formData.get("collectionId");
+  const tagToAdd = formData.get("tagToAdd");
   const assignmentMode = formData.get("assignmentMode");
 
-  const GET_COLLECTION_QUERY = `#graphql
-    query getCollectionProducts($id: ID!) {
-      collection(id: $id) {
-        id
-        title
-        products(first: 250) {
-          edges {
-            node {
-              id
-            }
+  if (!tagToAdd || tagToAdd.trim() === "") {
+    return {
+      success: false,
+      error: "Tag name is required",
+    };
+  }
+
+  const GET_PRODUCTS_WITH_TAG_QUERY = `#graphql
+    query getProductsWithTag($query: String!) {
+      products(first: 250, query: $query) {
+        edges {
+          node {
+            id
+            tags
           }
         }
       }
     }
   `;
 
-  const ADD_PRODUCTS_MUTATION = `#graphql
-    mutation addProductsToCollection($id: ID!, $productIds: [ID!]!) {
-      collectionAddProducts(id: $id, productIds: $productIds) {
-        collection {
+  const UPDATE_PRODUCT_TAGS_MUTATION = `#graphql
+    mutation productUpdate($input: ProductInput!) {
+      productUpdate(input: $input) {
+        product {
           id
-          title
-        }
-        userErrors {
-          field
-          message
-        }
-      }
-    }
-  `;
-
-  const REMOVE_PRODUCTS_MUTATION = `#graphql
-    mutation removeProductsFromCollection($id: ID!, $productIds: [ID!]!) {
-      collectionRemoveProducts(id: $id, productIds: $productIds) {
-        job {
-          id
+          tags
         }
         userErrors {
           field
@@ -378,85 +313,150 @@ export const action = async ({ request }) => {
   `;
 
   try {
-    const collectionResponse = await admin.graphql(GET_COLLECTION_QUERY, {
-      variables: { id: collectionId },
-    });
-    const collectionJson = await collectionResponse.json();
-    
-    const existingProductIds = 
-      collectionJson.data?.collection?.products?.edges?.map(e => e.node.id) || [];
-    const existingProductIdsSet = new Set(existingProductIds);
+    let addedCount = 0;
+    let skippedCount = 0;
+    let removedCount = 0;
 
     if (assignmentMode === "replace") {
-      if (existingProductIds.length > 0) {
-        const removeResponse = await admin.graphql(REMOVE_PRODUCTS_MUTATION, {
+      // Step 1: Get all products that currently have this tag
+      const currentTaggedResponse = await admin.graphql(GET_PRODUCTS_WITH_TAG_QUERY, {
+        variables: { query: `tag:${tagToAdd}` },
+      });
+      const currentTaggedJson = await currentTaggedResponse.json();
+      
+      const currentTaggedProducts = currentTaggedJson.data?.products?.edges?.map(e => ({
+        id: e.node.id,
+        tags: e.node.tags
+      })) || [];
+
+      // Step 2: Remove tag from all current products
+      for (const product of currentTaggedProducts) {
+        const updatedTags = product.tags.filter(tag => tag !== tagToAdd);
+        
+        const removeResponse = await admin.graphql(UPDATE_PRODUCT_TAGS_MUTATION, {
           variables: {
-            id: collectionId,
-            productIds: existingProductIds,
+            input: {
+              id: product.id,
+              tags: updatedTags,
+            },
           },
         });
 
         const removeJson = await removeResponse.json();
 
-        if (removeJson.data?.collectionRemoveProducts?.userErrors?.length > 0) {
-          return {
-            success: false,
-            error: removeJson.data.collectionRemoveProducts.userErrors[0].message,
-          };
+        if (removeJson.data?.productUpdate?.userErrors?.length > 0) {
+          console.error(`Error removing tag from ${product.id}:`, removeJson.data.productUpdate.userErrors);
+        } else {
+          removedCount++;
         }
+
+        // Small delay to avoid rate limits
+        await new Promise(resolve => setTimeout(resolve, 100));
       }
 
-      const response = await admin.graphql(ADD_PRODUCTS_MUTATION, {
-        variables: {
-          id: collectionId,
-          productIds: productIds,
-        },
-      });
+      // Step 3: Add tag to selected products
+      for (const productId of productIds) {
+        // Get current tags
+        const getProductResponse = await admin.graphql(`#graphql
+          query getProduct($id: ID!) {
+            product(id: $id) {
+              id
+              tags
+            }
+          }
+        `, {
+          variables: { id: productId },
+        });
 
-      const json = await response.json();
+        const productJson = await getProductResponse.json();
+        const currentTags = productJson.data?.product?.tags || [];
 
-      if (json.data?.collectionAddProducts?.userErrors?.length > 0) {
-        return {
-          success: false,
-          error: json.data.collectionAddProducts.userErrors[0].message,
-        };
+        // Skip if tag already exists
+        if (currentTags.includes(tagToAdd)) {
+          skippedCount++;
+          continue;
+        }
+
+        // Add new tag
+        const updatedTags = [...currentTags, tagToAdd];
+
+        const updateResponse = await admin.graphql(UPDATE_PRODUCT_TAGS_MUTATION, {
+          variables: {
+            input: {
+              id: productId,
+              tags: updatedTags,
+            },
+          },
+        });
+
+        const updateJson = await updateResponse.json();
+
+        if (updateJson.data?.productUpdate?.userErrors?.length > 0) {
+          console.error(`Error adding tag to ${productId}:`, updateJson.data.productUpdate.userErrors);
+        } else {
+          addedCount++;
+        }
+
+        // Small delay to avoid rate limits
+        await new Promise(resolve => setTimeout(resolve, 100));
       }
 
       return {
         success: true,
-        message: `Successfully replaced collection with ${productIds.length} product(s) (removed ${existingProductIds.length} existing)`,
+        message: `Successfully replaced tag "${tagToAdd}": removed from ${removedCount} product(s), added to ${addedCount} product(s)${skippedCount > 0 ? `, skipped ${skippedCount} (already tagged)` : ''}`,
       };
+
     } else {
-      const productsToAdd = productIds.filter(id => !existingProductIdsSet.has(id));
-      
-      const skippedCount = productIds.length - productsToAdd.length;
+      // "add" mode - just add tags to selected products
+      for (const productId of productIds) {
+        // Get current tags
+        const getProductResponse = await admin.graphql(`#graphql
+          query getProduct($id: ID!) {
+            product(id: $id) {
+              id
+              tags
+            }
+          }
+        `, {
+          variables: { id: productId },
+        });
 
-      if (productsToAdd.length === 0) {
-        return {
-          success: true,
-          message: `All ${productIds.length} product(s) are already in this collection`,
-        };
+        const productJson = await getProductResponse.json();
+        const currentTags = productJson.data?.product?.tags || [];
+
+        // Skip if tag already exists
+        if (currentTags.includes(tagToAdd)) {
+          skippedCount++;
+          continue;
+        }
+
+        // Add new tag
+        const updatedTags = [...currentTags, tagToAdd];
+
+        const updateResponse = await admin.graphql(UPDATE_PRODUCT_TAGS_MUTATION, {
+          variables: {
+            input: {
+              id: productId,
+              tags: updatedTags,
+            },
+          },
+        });
+
+        const updateJson = await updateResponse.json();
+
+        if (updateJson.data?.productUpdate?.userErrors?.length > 0) {
+          console.error(`Error adding tag to ${productId}:`, updateJson.data.productUpdate.userErrors);
+        } else {
+          addedCount++;
+        }
+
+        // Small delay to avoid rate limits
+        await new Promise(resolve => setTimeout(resolve, 100));
       }
 
-      const response = await admin.graphql(ADD_PRODUCTS_MUTATION, {
-        variables: {
-          id: collectionId,
-          productIds: productsToAdd,
-        },
-      });
-
-      const json = await response.json();
-
-      if (json.data?.collectionAddProducts?.userErrors?.length > 0) {
-        return {
-          success: false,
-          error: json.data.collectionAddProducts.userErrors[0].message,
-        };
-      }
-
-      let message = `Successfully added ${productsToAdd.length} product(s) to collection`;
+      let message = `Successfully added tag "${tagToAdd}" to ${addedCount} product(s)`;
       if (skippedCount > 0) {
-        message += ` (${skippedCount} already in collection)`;
+        message += ` (${skippedCount} already had this tag)`;
       }
 
       return {
@@ -465,35 +465,29 @@ export const action = async ({ request }) => {
       };
     }
   } catch (e) {
-    console.error("Error adding products to collection", e);
+    console.error("Error managing product tags", e);
     return {
       success: false,
-      error: "Failed to add products to collection",
+      error: "Failed to manage product tags",
     };
   }
 };
 
 export default function BestSellers() {
-  const { products, collections, collectionName, selectedRange, dateRangeLabel, bestSellersCollectionId, totalOrdersProcessed, error } = useLoaderData();
+  const { products, collectionName, selectedRange, dateRangeLabel, totalOrdersProcessed, error } = useLoaderData();
   const fetcher = useFetcher();
   const navigation = useNavigation();
   const navigate = useNavigate();
   
   const [selectedProducts, setSelectedProducts] = useState(new Set());
   const [showModal, setShowModal] = useState(false);
-  const [selectedCollection, setSelectedCollection] = useState(bestSellersCollectionId || "");
+  const [tagToAdd, setTagToAdd] = useState("best-seller");
   const [assignmentMode, setAssignmentMode] = useState("add");
   const [rangeValue, setRangeValue] = useState(
     selectedRange?.weeks ? `weeks-${selectedRange.weeks}` : `months-${selectedRange?.months || 1}`
   );
 
   const isLoading = navigation.state === "loading";
-
-  useEffect(() => {
-    if (bestSellersCollectionId && !selectedCollection) {
-      setSelectedCollection(bestSellersCollectionId);
-    }
-  }, [bestSellersCollectionId, selectedCollection]);
 
   const handleSelectAll = () => {
     if (selectedProducts.size === products.length) {
@@ -517,9 +511,9 @@ export default function BestSellers() {
     setShowModal(true);
   };
 
-  const handleAssignCollection = () => {
-    if (!selectedCollection) {
-      alert("Please select a collection");
+  const handleAssignTags = () => {
+    if (!tagToAdd || tagToAdd.trim() === "") {
+      alert("Please enter a tag name");
       return;
     }
 
@@ -528,7 +522,7 @@ export default function BestSellers() {
     fetcher.submit(
       {
         productIds: JSON.stringify(productIdsArray),
-        collectionId: selectedCollection,
+        tagToAdd: tagToAdd.trim(),
         assignmentMode: assignmentMode,
       },
       { method: "post" }
@@ -539,7 +533,6 @@ export default function BestSellers() {
     const value = e.target.value;
     setRangeValue(value);
     
-    // Parse the value format: "weeks-1" or "months-3"
     const [type, amount] = value.split('-');
     
     if (type === 'weeks') {
@@ -555,14 +548,14 @@ export default function BestSellers() {
         const timer = setTimeout(() => {
           setShowModal(false);
           setSelectedProducts(new Set());
-          setSelectedCollection(bestSellersCollectionId || "");
+          setTagToAdd("best-seller");
           setAssignmentMode("add");
-        }, 2000);
+        }, 3000);
         
         return () => clearTimeout(timer);
       }
     }
-  }, [fetcher.state, fetcher.data, showModal, bestSellersCollectionId]);
+  }, [fetcher.state, fetcher.data, showModal]);
 
   const allSelected = products.length > 0 && selectedProducts.size === products.length;
 
@@ -584,15 +577,6 @@ export default function BestSellers() {
         {fetcher.data?.error && (
           <s-box marginBottom="base">
             <s-text tone="critical">{fetcher.data.error}</s-text>
-          </s-box>
-        )}
-
-        {!bestSellersCollectionId && collections.length > 0 && !isLoading && (
-          <s-box marginBottom="base">
-            <s-text tone="warning">
-              No manual "Best Sellers" collection found. Smart/automated collections can't have products manually added. 
-              Please create a manual collection named "Best Sellers" or select a different manual collection.
-            </s-text>
           </s-box>
         )}
 
@@ -661,7 +645,7 @@ export default function BestSellers() {
               
               {selectedProducts.size > 0 && (
                 <s-button onClick={handleMoveToClick}>
-                  Move to ({selectedProducts.size})
+                  Assign Tags ({selectedProducts.size})
                 </s-button>
               )}
             </s-box>
@@ -690,7 +674,7 @@ export default function BestSellers() {
                       Product Name
                     </th>
                     <th style={{ textAlign: "left", padding: "8px" }}>
-                      Collections
+                      Current Tags
                     </th>
                     <th style={{ textAlign: "left", padding: "8px" }}>
                       Sold Units
@@ -727,9 +711,9 @@ export default function BestSellers() {
                       </td>
                       <td style={{ padding: "8px" }}>{product.title}</td>
                       <td style={{ padding: "8px" }}>
-                        {product.collections?.length
-                          ? product.collections.join(", ")
-                          : "No collection"}
+                        {product.tags?.length
+                          ? product.tags.join(", ")
+                          : "No tags"}
                       </td>
                       <td style={{ padding: "8px" }}>{product.soldUnits}</td>
                       <td style={{ padding: "8px" }}>
@@ -755,7 +739,7 @@ export default function BestSellers() {
         )}
       </s-section>
 
-      {/* Modal - same as before */}
+      {/* Modal */}
       {showModal && (
         <div
           style={{
@@ -782,7 +766,7 @@ export default function BestSellers() {
             }}
             onClick={(e) => e.stopPropagation()}
           >
-            <s-heading>Assign to Collection</s-heading>
+            <s-heading>Assign Tag to Products</s-heading>
             
             <s-box marginTop="base" marginBottom="base">
               <s-text>
@@ -792,32 +776,26 @@ export default function BestSellers() {
 
             <s-box marginTop="base" marginBottom="base">
               <label style={{ display: "block", marginBottom: "8px" }}>
-                <s-text>Select Collection (Manual Collections Only):</s-text>
+                <s-text>Tag Name:</s-text>
               </label>
-              <select
-                value={selectedCollection}
-                onChange={(e) => setSelectedCollection(e.target.value)}
+              <input
+                type="text"
+                value={tagToAdd}
+                onChange={(e) => setTagToAdd(e.target.value)}
+                placeholder="e.g., best-seller, featured, trending"
                 style={{
                   width: "100%",
                   padding: "8px",
                   borderRadius: "4px",
                   border: "1px solid #ccc",
+                  fontSize: "14px",
                 }}
-              >
-                <option value="">-- Choose a collection --</option>
-                {collections.map((collection) => (
-                  <option key={collection.id} value={collection.id}>
-                    {collection.title}
-                  </option>
-                ))}
-              </select>
-              {collections.length === 0 && (
-                <s-box marginTop="small">
-                  <s-text tone="critical" size="small">
-                    No manual collections available. Smart collections cannot have products manually added.
-                  </s-text>
-                </s-box>
-              )}
+              />
+              <s-box marginTop="small">
+                <s-text subdued size="small">
+                  This tag will be used in your condition-based collections
+                </s-text>
+              </s-box>
             </s-box>
 
             <s-box marginTop="base" marginBottom="base">
@@ -839,7 +817,7 @@ export default function BestSellers() {
                     <s-text><strong>Add to existing</strong></s-text>
                     <br />
                     <s-text subdued style={{ fontSize: "13px" }}>
-                      Add these products to Best Sellers Collection
+                      Keep current tags and add new tag to selected products (skip if already tagged)
                     </s-text>
                   </div>
                 </label>
@@ -857,7 +835,7 @@ export default function BestSellers() {
                     <s-text><strong>Replace all</strong></s-text>
                     <br />
                     <s-text subdued style={{ fontSize: "13px" }}>
-                      Replace all products in Best Sellers Collection
+                      Remove tag from ALL products, then add to selected products only (skip if already tagged)
                     </s-text>
                   </div>
                 </label>
@@ -873,8 +851,8 @@ export default function BestSellers() {
               </s-button>
               <s-button
                 primary
-                onClick={handleAssignCollection}
-                disabled={!selectedCollection || fetcher.state === "submitting" || collections.length === 0}
+                onClick={handleAssignTags}
+                disabled={!tagToAdd.trim() || fetcher.state === "submitting"}
               >
                 {fetcher.state === "submitting" ? "Assigning..." : "Continue"}
               </s-button>
