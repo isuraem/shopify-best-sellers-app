@@ -2,8 +2,8 @@
 // FILE: app/routes/app.duplicate-skus.jsx
 // ============================================
 
-import { useState } from "react";
-import { useLoaderData, useNavigation } from "react-router";
+import { useState, useEffect } from "react";
+import { useLoaderData, useNavigation, useFetcher, useRevalidator } from "react-router";
 import { authenticate } from "../shopify.server";
 
 // Named export for the loader
@@ -197,17 +197,153 @@ export async function loader({ request }) {
   }
 }
 
+// Action to handle product deletion
+export async function action({ request }) {
+  const { admin } = await authenticate.admin(request);
+  const formData = await request.formData();
+  const productId = formData.get("productId");
+  const actionType = formData.get("actionType");
+
+  if (actionType === "deleteProduct") {
+    if (!productId) {
+      return {
+        success: false,
+        error: "No product ID provided",
+      };
+    }
+
+    try {
+      console.log(`🗑️ Attempting to delete product: ${productId}`);
+
+      const DELETE_PRODUCT_MUTATION = `#graphql
+        mutation deleteProduct($input: ProductDeleteInput!) {
+          productDelete(input: $input) {
+            deletedProductId
+            userErrors {
+              field
+              message
+            }
+          }
+        }
+      `;
+
+      const response = await admin.graphql(DELETE_PRODUCT_MUTATION, {
+        variables: {
+          input: {
+            id: productId,
+          },
+        },
+      });
+
+      const json = await response.json();
+
+      if (json.data?.productDelete?.userErrors?.length > 0) {
+        const errorMessage = json.data.productDelete.userErrors[0].message;
+        console.error("Delete error:", errorMessage);
+        return {
+          success: false,
+          error: errorMessage,
+        };
+      }
+
+      if (json.data?.productDelete?.deletedProductId) {
+        console.log(`✅ Successfully deleted product: ${productId}`);
+        return {
+          success: true,
+          deletedProductId: json.data.productDelete.deletedProductId,
+        };
+      }
+
+      return {
+        success: false,
+        error: "Unknown error occurred while deleting product",
+      };
+    } catch (error) {
+      console.error("Error deleting product:", error);
+      return {
+        success: false,
+        error: `Error deleting product: ${error.message}`,
+      };
+    }
+  }
+
+  return {
+    success: false,
+    error: "Invalid action type",
+  };
+}
+
 // Default export for the component
 export default function DuplicateSKUs() {
   const { duplicates, totalProductsScanned, totalVariantsScanned, totalUniqueSKUs, error } = useLoaderData();
   const navigation = useNavigation();
+  const fetcher = useFetcher();
+  const revalidator = useRevalidator();
   const [expandedSKU, setExpandedSKU] = useState(null);
+  
+  // Modal states
+  const [showModal, setShowModal] = useState(false);
+  const [modalState, setModalState] = useState("confirm"); // "confirm", "deleting", "refreshing"
+  const [selectedProduct, setSelectedProduct] = useState(null);
 
   const isLoading = navigation.state === "loading";
+  const isRevalidating = revalidator.state === "loading";
 
   const toggleExpand = (sku) => {
     setExpandedSKU(expandedSKU === sku ? null : sku);
   };
+
+  const handleDeleteClick = (productId, productTitle) => {
+    setSelectedProduct({ productId, productTitle });
+    setModalState("confirm");
+    setShowModal(true);
+  };
+
+  const handleConfirmDelete = () => {
+    setModalState("deleting");
+    fetcher.submit(
+      {
+        actionType: "deleteProduct",
+        productId: selectedProduct.productId,
+      },
+      { method: "post" }
+    );
+  };
+
+  const handleCancelDelete = () => {
+    setShowModal(false);
+    setSelectedProduct(null);
+    setModalState("confirm");
+  };
+
+  // Handle fetcher completion
+  useEffect(() => {
+    if (fetcher.state === "idle" && fetcher.data && showModal) {
+      if (fetcher.data.success) {
+        // Deletion successful, now refresh data
+        setModalState("refreshing");
+        setTimeout(() => {
+          revalidator.revalidate();
+        }, 500);
+      } else {
+        // Error occurred, close modal
+        setShowModal(false);
+        setSelectedProduct(null);
+        setModalState("confirm");
+      }
+    }
+  }, [fetcher.state, fetcher.data, showModal, revalidator]);
+
+  // Hide modal when revalidation completes
+  useEffect(() => {
+    if (!isRevalidating && modalState === "refreshing" && showModal) {
+      setTimeout(() => {
+        setShowModal(false);
+        setSelectedProduct(null);
+        setModalState("confirm");
+      }, 300);
+    }
+  }, [isRevalidating, modalState, showModal]);
 
   return (
     <s-page heading="Duplicate SKU Finder">
@@ -216,6 +352,160 @@ export default function DuplicateSKUs() {
           <s-box marginBottom="base">
             <s-text tone="critical">{error}</s-text>
           </s-box>
+        )}
+
+        {fetcher.data?.error && !showModal && (
+          <s-box marginBottom="base">
+            <s-text tone="critical">Delete Error: {fetcher.data.error}</s-text>
+          </s-box>
+        )}
+
+        {/* Custom Confirmation/Loading Modal */}
+        {showModal && selectedProduct && (
+          <div
+            style={{
+              position: "fixed",
+              top: 0,
+              left: 0,
+              right: 0,
+              bottom: 0,
+              backgroundColor: "rgba(0, 0, 0, 0.6)",
+              display: "flex",
+              alignItems: "center",
+              justifyContent: "center",
+              zIndex: 9999,
+            }}
+            onClick={(e) => {
+              // Close modal if clicking outside (only in confirm state)
+              if (modalState === "confirm" && e.target === e.currentTarget) {
+                handleCancelDelete();
+              }
+            }}
+          >
+            <div
+              style={{
+                backgroundColor: "white",
+                padding: "40px",
+                borderRadius: "12px",
+                boxShadow: "0 20px 60px rgba(0, 0, 0, 0.3)",
+                minWidth: "450px",
+                maxWidth: "500px",
+              }}
+            >
+              {/* Confirmation State */}
+              {modalState === "confirm" && (
+                <>
+                  <div style={{ textAlign: "center", marginBottom: "24px" }}>
+                    <div
+                      style={{
+                        fontSize: "48px",
+                        marginBottom: "16px",
+                      }}
+                    >
+                      ⚠️
+                    </div>
+                    <s-heading size="large">Delete Product?</s-heading>
+                  </div>
+
+                  <div
+                    style={{
+                      backgroundColor: "#f9fafb",
+                      padding: "16px",
+                      borderRadius: "8px",
+                      marginBottom: "24px",
+                    }}
+                  >
+                    <s-text>
+                      <strong>{selectedProduct.productTitle}</strong>
+                    </s-text>
+                  </div>
+
+                  <s-box marginBottom="large">
+                    <s-text subdued>
+                      This action cannot be undone. The product will be permanently removed from your store.
+                    </s-text>
+                  </s-box>
+
+                  <div style={{ display: "flex", gap: "12px", justifyContent: "flex-end" }}>
+                    <button
+                      onClick={handleCancelDelete}
+                      style={{
+                        backgroundColor: "#f3f4f6",
+                        color: "#374151",
+                        border: "none",
+                        padding: "10px 24px",
+                        borderRadius: "6px",
+                        fontSize: "14px",
+                        fontWeight: "500",
+                        cursor: "pointer",
+                        transition: "background-color 0.2s",
+                      }}
+                      onMouseEnter={(e) => {
+                        e.target.style.backgroundColor = "#e5e7eb";
+                      }}
+                      onMouseLeave={(e) => {
+                        e.target.style.backgroundColor = "#f3f4f6";
+                      }}
+                    >
+                      Cancel
+                    </button>
+                    <button
+                      onClick={handleConfirmDelete}
+                      style={{
+                        backgroundColor: "#dc2626",
+                        color: "white",
+                        border: "none",
+                        padding: "10px 24px",
+                        borderRadius: "6px",
+                        fontSize: "14px",
+                        fontWeight: "500",
+                        cursor: "pointer",
+                        transition: "background-color 0.2s",
+                      }}
+                      onMouseEnter={(e) => {
+                        e.target.style.backgroundColor = "#b91c1c";
+                      }}
+                      onMouseLeave={(e) => {
+                        e.target.style.backgroundColor = "#dc2626";
+                      }}
+                    >
+                      Yes, Delete Product
+                    </button>
+                  </div>
+                </>
+              )}
+
+              {/* Deleting State */}
+              {modalState === "deleting" && (
+                <div style={{ textAlign: "center" }}>
+                  <s-spinner size="large" />
+                  <s-box marginTop="large">
+                    <s-heading size="medium">Deleting Product...</s-heading>
+                    <s-box marginTop="small">
+                      <s-text subdued>
+                        Removing "{selectedProduct.productTitle}" from your store
+                      </s-text>
+                    </s-box>
+                  </s-box>
+                </div>
+              )}
+
+              {/* Refreshing State */}
+              {modalState === "refreshing" && (
+                <div style={{ textAlign: "center" }}>
+                  <s-spinner size="large" />
+                  <s-box marginTop="large">
+                    <s-heading size="medium">Refreshing Data...</s-heading>
+                    <s-box marginTop="small">
+                      <s-text subdued>
+                        Fetching updated duplicate list
+                      </s-text>
+                    </s-box>
+                  </s-box>
+                </div>
+              )}
+            </div>
+          </div>
         )}
 
         {/* Loading State */}
@@ -328,20 +618,27 @@ export default function DuplicateSKUs() {
                             key={duplicate.sku}
                             style={{
                               borderBottom: "1px solid #eee",
-                              cursor: "pointer",
                               backgroundColor: expandedSKU === duplicate.sku ? "#f9fafb" : "white",
                             }}
-                            onClick={() => toggleExpand(duplicate.sku)}
                           >
-                            <td style={{ padding: "12px", textAlign: "center" }}>
+                            <td 
+                              style={{ padding: "12px", textAlign: "center", cursor: "pointer" }}
+                              onClick={() => toggleExpand(duplicate.sku)}
+                            >
                               <span style={{ fontSize: "18px" }}>
                                 {expandedSKU === duplicate.sku ? "▼" : "▶"}
                               </span>
                             </td>
-                            <td style={{ padding: "12px", fontFamily: "monospace", fontWeight: "500" }}>
+                            <td 
+                              style={{ padding: "12px", fontFamily: "monospace", fontWeight: "500", cursor: "pointer" }}
+                              onClick={() => toggleExpand(duplicate.sku)}
+                            >
                               {duplicate.sku}
                             </td>
-                            <td style={{ padding: "12px" }}>
+                            <td 
+                              style={{ padding: "12px", cursor: "pointer" }}
+                              onClick={() => toggleExpand(duplicate.sku)}
+                            >
                               <span
                                 style={{
                                   backgroundColor: "#fee2e2",
@@ -355,7 +652,10 @@ export default function DuplicateSKUs() {
                                 {duplicate.count} variants
                               </span>
                             </td>
-                            <td style={{ padding: "12px" }}>
+                            <td 
+                              style={{ padding: "12px", cursor: "pointer" }}
+                              onClick={() => toggleExpand(duplicate.sku)}
+                            >
                               <s-text tone="critical" size="small">⚠️ Needs attention</s-text>
                             </td>
                           </tr>
@@ -376,6 +676,7 @@ export default function DuplicateSKUs() {
                                         <th style={{ textAlign: "left", padding: "10px", fontSize: "13px", fontWeight: "600" }}>Variant ID</th>
                                         <th style={{ textAlign: "left", padding: "10px", fontSize: "13px", fontWeight: "600" }}>Inventory</th>
                                         <th style={{ textAlign: "left", padding: "10px", fontSize: "13px", fontWeight: "600" }}>Price</th>
+                                        <th style={{ textAlign: "center", padding: "10px", fontSize: "13px", fontWeight: "600" }}>Actions</th>
                                       </tr>
                                     </thead>
                                     <tbody>
@@ -433,6 +734,38 @@ export default function DuplicateSKUs() {
                                           </td>
                                           <td style={{ padding: "10px", fontSize: "13px", fontWeight: "500" }}>
                                             ${variant.price}
+                                          </td>
+                                          <td style={{ padding: "10px", textAlign: "center" }}>
+                                            <button
+                                              onClick={(e) => {
+                                                e.stopPropagation();
+                                                handleDeleteClick(variant.productId, variant.productTitle);
+                                              }}
+                                              disabled={showModal}
+                                              style={{
+                                                backgroundColor: showModal ? "#9ca3af" : "#dc2626",
+                                                color: "white",
+                                                border: "none",
+                                                padding: "6px 12px",
+                                                borderRadius: "4px",
+                                                fontSize: "12px",
+                                                fontWeight: "500",
+                                                cursor: showModal ? "not-allowed" : "pointer",
+                                                transition: "background-color 0.2s",
+                                              }}
+                                              onMouseEnter={(e) => {
+                                                if (!showModal) {
+                                                  e.target.style.backgroundColor = "#b91c1c";
+                                                }
+                                              }}
+                                              onMouseLeave={(e) => {
+                                                if (!showModal) {
+                                                  e.target.style.backgroundColor = "#dc2626";
+                                                }
+                                              }}
+                                            >
+                                              🗑️ Delete Product
+                                            </button>
                                           </td>
                                         </tr>
                                       ))}
