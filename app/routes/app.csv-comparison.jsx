@@ -134,7 +134,11 @@ export async function action({ request }) {
 
     for (const csvRow of csvRows) {
       const csvSKU = csvRow.SKU?.toString().trim();
-      const csvGTIN = csvRow.GTIN?.toString().trim();
+      // Handle GTIN as string and remove any decimals if it was parsed as number
+      let csvGTIN = csvRow.GTIN?.toString().trim();
+      if (csvGTIN && csvGTIN.includes('.')) {
+        csvGTIN = csvGTIN.split('.')[0]; // Remove decimal point
+      }
 
       if (!csvSKU) continue;
 
@@ -253,35 +257,78 @@ export default function CSVComparison() {
       const text = e.target.result;
       console.log("CSV content loaded, length:", text.length);
       
-      // Simple CSV parsing (you might want to use a library like PapaParse for production)
-      const lines = text.split("\n");
-      const headers = lines[0].split(",").map(h => h.trim().replace(/^"|"$/g, ""));
-      
-      console.log("CSV headers:", headers);
-      
-      const rows = [];
-      for (let i = 1; i < lines.length; i++) {
-        if (!lines[i].trim()) continue;
+      try {
+        // Better CSV parsing that handles commas inside quotes
+        const lines = text.split(/\r?\n/);
+        const headers = parseCSVLine(lines[0]);
         
-        const values = lines[i].split(",").map(v => v.trim().replace(/^"|"$/g, ""));
-        const row = {};
+        console.log("CSV headers:", headers);
         
-        headers.forEach((header, index) => {
-          row[header] = values[index] || "";
-        });
-        
-        rows.push(row);
+        const rows = [];
+        for (let i = 1; i < lines.length; i++) {
+          if (!lines[i].trim()) continue;
+          
+          const values = parseCSVLine(lines[i]);
+          const row = {};
+          
+          headers.forEach((header, index) => {
+            row[header] = values[index] || "";
+          });
+          
+          // Only add rows that have a SKU
+          if (row.SKU && row.SKU.trim()) {
+            rows.push(row);
+          }
+        }
+
+        console.log("Parsed rows:", rows.length);
+        console.log("First row sample:", rows[0]);
+
+        fetcher.submit(
+          { csvData: JSON.stringify(rows) },
+          { method: "post" }
+        );
+      } catch (error) {
+        console.error("CSV parsing error:", error);
+        alert("Error parsing CSV file. Please check the file format.");
       }
-
-      console.log("Parsed rows:", rows.length);
-
-      fetcher.submit(
-        { csvData: JSON.stringify(rows) },
-        { method: "post" }
-      );
     };
 
     reader.readAsText(csvFile);
+  };
+
+  // Helper function to properly parse CSV lines with quoted values
+  const parseCSVLine = (line) => {
+    const result = [];
+    let current = '';
+    let inQuotes = false;
+    
+    for (let i = 0; i < line.length; i++) {
+      const char = line[i];
+      const nextChar = line[i + 1];
+      
+      if (char === '"') {
+        if (inQuotes && nextChar === '"') {
+          // Escaped quote
+          current += '"';
+          i++;
+        } else {
+          // Toggle quote state
+          inQuotes = !inQuotes;
+        }
+      } else if (char === ',' && !inQuotes) {
+        // End of field
+        result.push(current.trim());
+        current = '';
+      } else {
+        current += char;
+      }
+    }
+    
+    // Add the last field
+    result.push(current.trim());
+    
+    return result;
   };
 
   return (
