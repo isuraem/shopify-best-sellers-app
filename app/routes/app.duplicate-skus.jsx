@@ -197,7 +197,7 @@ export async function loader({ request }) {
   }
 }
 
-// Action to handle product deletion AND SKU removal
+// Action to handle product deletion, SKU removal, and SKU re-assignment
 export async function action({ request }) {
   const { admin } = await authenticate.admin(request);
   const formData = await request.formData();
@@ -271,6 +271,53 @@ export async function action({ request }) {
     }
   }
 
+  // Common query + mutation for SKU-related operations
+  const VARIANTS_BY_SKU_QUERY = `#graphql
+    query getVariantsBySku($query: String!, $cursor: String) {
+      productVariants(first: 100, query: $query, after: $cursor) {
+        pageInfo {
+          hasNextPage
+          endCursor
+        }
+        edges {
+          node {
+            id
+            sku
+            product {
+              id
+              title
+            }
+            inventoryItem {
+              id
+              sku
+            }
+          }
+        }
+      }
+    }
+  `;
+
+  const BULK_UPDATE_MUTATION = `#graphql
+    mutation bulkUpdateVariants(
+      $productId: ID!,
+      $variants: [ProductVariantsBulkInput!]!
+    ) {
+      productVariantsBulkUpdate(productId: $productId, variants: $variants) {
+        productVariants {
+          id
+          sku
+          inventoryItem {
+            sku
+          }
+        }
+        userErrors {
+          field
+          message
+        }
+      }
+    }
+  `;
+
   // ============================
   // REMOVE SKU FROM VARIANTS
   // ============================
@@ -285,61 +332,10 @@ export async function action({ request }) {
     try {
       console.log(`🔧 Removing SKU "${sku}" from all matching variants...`);
 
-      // 1) Find variants by SKU
-      const VARIANTS_BY_SKU_QUERY = `#graphql
-        query getVariantsBySku($query: String!, $cursor: String) {
-          productVariants(first: 100, query: $query, after: $cursor) {
-            pageInfo {
-              hasNextPage
-              endCursor
-            }
-            edges {
-              node {
-                id
-                sku
-                product {
-                  id
-                  title
-                }
-                inventoryItem {
-                  id
-                  sku
-                }
-              }
-            }
-          }
-        }
-      `;
-
-      // 2) Bulk clear SKU using productVariantsBulkUpdate
-      const BULK_CLEAR_SKU_MUTATION = `#graphql
-        mutation clearSkuFromVariants(
-          $productId: ID!,
-          $variants: [ProductVariantsBulkInput!]!
-        ) {
-          productVariantsBulkUpdate(productId: $productId, variants: $variants) {
-            productVariants {
-              id
-              sku
-              inventoryItem {
-                sku
-              }
-            }
-            userErrors {
-              field
-              message
-            }
-          }
-        }
-      `;
-
       let cursor = null;
       let hasNextPage = true;
-
-      // Map productId -> [ProductVariantsBulkInput]
       const variantsByProduct = new Map();
 
-      // Collect all variants with this SKU
       while (hasNextPage) {
         const response = await admin.graphql(VARIANTS_BY_SKU_QUERY, {
           variables: {
@@ -359,9 +355,7 @@ export async function action({ request }) {
         }
 
         const conn = json.data?.productVariants;
-        if (!conn) {
-          break;
-        }
+        if (!conn) break;
 
         const edges = conn.edges || [];
         for (const edge of edges) {
@@ -395,11 +389,10 @@ export async function action({ request }) {
         };
       }
 
-      // Run bulk update per product
       let totalUpdated = 0;
 
       for (const [productIdForVariant, variantInputs] of variantsByProduct.entries()) {
-        const response = await admin.graphql(BULK_CLEAR_SKU_MUTATION, {
+        const response = await admin.graphql(BULK_UPDATE_MUTATION, {
           variables: {
             productId: productIdForVariant,
             variants: variantInputs,
@@ -451,6 +444,137 @@ export async function action({ request }) {
     }
   }
 
+  // ============================
+  // RE-ASSIGN SKUs (ic-{variantID})
+  // ============================
+  if (actionType === "reassignSku") {
+    if (!sku) {
+      return {
+        success: false,
+        error: "No SKU provided",
+      };
+    }
+
+    try {
+      console.log(`🔁 Re-assigning SKU "${sku}" to pattern ic-{variantID}...`);
+
+      let cursor = null;
+      let hasNextPage = true;
+      const variantsByProduct = new Map();
+
+      while (hasNextPage) {
+        const response = await admin.graphql(VARIANTS_BY_SKU_QUERY, {
+          variables: {
+            query: `sku:${sku}`,
+            cursor,
+          },
+        });
+
+        const json = await response.json();
+
+        if (json.errors) {
+          console.error("GraphQL errors while searching variants by SKU:", json.errors);
+          return {
+            success: false,
+            error: `GraphQL search error: ${json.errors[0].message}`,
+          };
+        }
+
+        const conn = json.data?.productVariants;
+        if (!conn) break;
+
+        const edges = conn.edges || [];
+        for (const edge of edges) {
+          const node = edge.node;
+          if (!node?.sku) continue;
+          if (node.sku.trim() !== sku) continue;
+
+          const productIdForVariant = node.product.id;
+
+          if (!variantsByProduct.has(productIdForVariant)) {
+            variantsByProduct.set(productIdForVariant, []);
+          }
+
+          // Extract numeric part of variant ID for pattern ic-{variantID}
+          const variantGid = node.id; // gid://shopify/ProductVariant/1234567890
+          const numericId = variantGid.split("/").pop();
+          const newSku = `IC-${numericId}`;
+
+          variantsByProduct.get(productIdForVariant).push({
+            id: node.id,
+            inventoryItem: {
+              sku: newSku,
+            },
+          });
+        }
+
+        hasNextPage = conn.pageInfo?.hasNextPage;
+        cursor = conn.pageInfo?.endCursor || null;
+      }
+
+      if (variantsByProduct.size === 0) {
+        console.log(`No variants found with SKU "${sku}"`);
+        return {
+          success: false,
+          error: `No variants found with SKU "${sku}"`,
+        };
+      }
+
+      let totalUpdated = 0;
+
+      for (const [productIdForVariant, variantInputs] of variantsByProduct.entries()) {
+        const response = await admin.graphql(BULK_UPDATE_MUTATION, {
+          variables: {
+            productId: productIdForVariant,
+            variants: variantInputs,
+          },
+        });
+
+        const json = await response.json();
+
+        if (json.errors) {
+          console.error(
+            `GraphQL errors while re-assigning SKU for product ${productIdForVariant}:`,
+            json.errors
+          );
+          return {
+            success: false,
+            error: `GraphQL bulk update error: ${json.errors[0].message}`,
+          };
+        }
+
+        const payload = json.data?.productVariantsBulkUpdate;
+        const userErrors = payload?.userErrors || [];
+
+        if (userErrors.length > 0) {
+          console.error("Bulk update userErrors:", userErrors);
+          return {
+            success: false,
+            error: userErrors[0].message,
+          };
+        }
+
+        totalUpdated += payload?.productVariants?.length || 0;
+      }
+
+      console.log(
+        `✅ Re-assigned SKU "${sku}" to ic-{variantID} pattern on ${totalUpdated} variants across ${variantsByProduct.size} product(s)`
+      );
+
+      return {
+        success: true,
+        reassignBaseSku: sku,
+        variantsUpdated: totalUpdated,
+      };
+    } catch (error) {
+      console.error("Error re-assigning SKU:", error);
+      return {
+        success: false,
+        error: `Error re-assigning SKU: ${error.message}`,
+      };
+    }
+  }
+
   return {
     success: false,
     error: "Invalid action type",
@@ -470,7 +594,7 @@ export default function DuplicateSKUs() {
   // Modal states
   const [showModal, setShowModal] = useState(false);
   const [modalState, setModalState] = useState("confirm"); // "confirm", "deleting"
-  const [modalAction, setModalAction] = useState(null); // "deleteProduct" | "removeSku"
+  const [modalAction, setModalAction] = useState(null); // "deleteProduct" | "removeSku" | "reassignSku"
   const [selectedProduct, setSelectedProduct] = useState(null);
   const [selectedSku, setSelectedSku] = useState(null);
 
@@ -496,6 +620,14 @@ export default function DuplicateSKUs() {
     setShowModal(true);
   };
 
+  const handleReassignSkuClick = (sku, count) => {
+    setSelectedSku({ sku, count });
+    setSelectedProduct(null);
+    setModalAction("reassignSku");
+    setModalState("confirm");
+    setShowModal(true);
+  };
+
   const handleConfirm = () => {
     if (modalAction === "deleteProduct" && selectedProduct) {
       setModalState("deleting");
@@ -515,6 +647,15 @@ export default function DuplicateSKUs() {
         },
         { method: "post" }
       );
+    } else if (modalAction === "reassignSku" && selectedSku) {
+      setModalState("deleting");
+      fetcher.submit(
+        {
+          actionType: "reassignSku",
+          sku: selectedSku.sku,
+        },
+        { method: "post" }
+      );
     }
   };
 
@@ -526,16 +667,15 @@ export default function DuplicateSKUs() {
     setModalState("confirm");
   };
 
-  // Handle fetcher completion (close modal, revalidate in background)
+  // Handle fetcher completion (only after an operation is in progress)
   useEffect(() => {
-    // Only handle completion if we were actually performing an operation
     if (modalState === "deleting" && fetcher.state === "idle" && fetcher.data) {
       if (fetcher.data.success) {
         // Operation successful, revalidate list in the background
         revalidator.revalidate();
       }
 
-      // Close modal and reset state (regardless of success/error)
+      // Close modal and reset state
       setShowModal(false);
       setSelectedProduct(null);
       setSelectedSku(null);
@@ -543,7 +683,6 @@ export default function DuplicateSKUs() {
       setModalState("confirm");
     }
   }, [fetcher.state, fetcher.data, modalState, revalidator]);
-
 
   return (
     <s-page heading="Duplicate SKU Finder">
@@ -607,7 +746,9 @@ export default function DuplicateSKUs() {
                     <s-heading size="large">
                       {modalAction === "deleteProduct"
                         ? "Delete Product?"
-                        : "Remove SKU from Variants?"}
+                        : modalAction === "removeSku"
+                        ? "Remove SKU from Variants?"
+                        : "Re-assign SKUs?"}
                     </s-heading>
                   </div>
 
@@ -625,7 +766,7 @@ export default function DuplicateSKUs() {
                       </s-text>
                     )}
 
-                    {modalAction === "removeSku" && selectedSku && (
+                    {modalAction !== "deleteProduct" && selectedSku && (
                       <>
                         <s-text>
                           <strong>SKU: {selectedSku.sku}</strong>
@@ -646,10 +787,15 @@ export default function DuplicateSKUs() {
                         This action cannot be undone. The product will be permanently
                         removed from your store.
                       </s-text>
-                    ) : (
+                    ) : modalAction === "removeSku" ? (
                       <s-text subdued>
                         This will clear this SKU from all matching variants. The variants
                         will remain, but their SKU field will be empty.
+                      </s-text>
+                    ) : (
+                      <s-text subdued>
+                        This will assign new SKUs to all matching variants using the
+                        pattern <code>ic-{"{variantID}"}</code>.
                       </s-text>
                     )}
                   </s-box>
@@ -705,7 +851,9 @@ export default function DuplicateSKUs() {
                     >
                       {modalAction === "deleteProduct"
                         ? "Yes, Delete Product"
-                        : "Yes, Remove from Variants"}
+                        : modalAction === "removeSku"
+                        ? "Yes, Remove from Variants"
+                        : "Yes, Re-assign SKUs"}
                     </button>
                   </div>
                 </>
@@ -719,15 +867,19 @@ export default function DuplicateSKUs() {
                     <s-heading size="medium">
                       {modalAction === "deleteProduct"
                         ? "Deleting Product..."
-                        : "Removing SKU..."}
+                        : modalAction === "removeSku"
+                        ? "Removing SKU..."
+                        : "Re-assigning SKUs..."}
                     </s-heading>
                     <s-box marginTop="small">
                       <s-text subdued>
                         {modalAction === "deleteProduct" && selectedProduct
                           ? `Removing "${selectedProduct.productTitle}" from your store`
-                          : selectedSku
-                            ? `Clearing SKU "${selectedSku.sku}" from matching variants`
-                            : "Processing..."}
+                          : modalAction === "removeSku" && selectedSku
+                          ? `Clearing SKU "${selectedSku.sku}" from matching variants`
+                          : modalAction === "reassignSku" && selectedSku
+                          ? `Assigning SKUs in pattern ic-{variantID} for duplicates of "${selectedSku.sku}"`
+                          : "Processing..."}
                       </s-text>
                     </s-box>
                   </s-box>
@@ -783,25 +935,19 @@ export default function DuplicateSKUs() {
                   <s-text subdued size="small">
                     Products Scanned
                   </s-text>
-                  <s-heading size="medium">
-                    {totalProductsScanned || 0}
-                  </s-heading>
+                  <s-heading size="medium">{totalProductsScanned || 0}</s-heading>
                 </div>
                 <div>
                   <s-text subdued size="small">
                     Variants Scanned
                   </s-text>
-                  <s-heading size="medium">
-                    {totalVariantsScanned || 0}
-                  </s-heading>
+                  <s-heading size="medium">{totalVariantsScanned || 0}</s-heading>
                 </div>
                 <div>
                   <s-text subdued size="small">
                     Unique SKUs
                   </s-text>
-                  <s-heading size="medium">
-                    {totalUniqueSKUs || 0}
-                  </s-heading>
+                  <s-heading size="medium">{totalUniqueSKUs || 0}</s-heading>
                 </div>
                 <div>
                   <s-text subdued size="small">
@@ -831,8 +977,7 @@ export default function DuplicateSKUs() {
                 <s-heading size="large">✅ No Duplicate SKUs Found!</s-heading>
                 <s-box marginTop="base">
                   <s-text>
-                    All SKUs in your store are unique. Your inventory is
-                    well-organized.
+                    All SKUs in your store are unique. Your inventory is well-organized.
                   </s-text>
                 </s-box>
               </s-box>
@@ -869,9 +1014,9 @@ export default function DuplicateSKUs() {
                         <th style={{ textAlign: "left", padding: "12px" }}>
                           Duplicate Count
                         </th>
-                        <th style={{ textAlign: "left", padding: "12px" }}>
+                        {/* <th style={{ textAlign: "left", padding: "12px" }}>
                           Status
-                        </th>
+                        </th> */}
                         <th style={{ textAlign: "left", padding: "12px" }}>
                           Actions
                         </th>
@@ -886,9 +1031,7 @@ export default function DuplicateSKUs() {
                             style={{
                               borderBottom: "1px solid #eee",
                               backgroundColor:
-                                expandedSKU === duplicate.sku
-                                  ? "#f9fafb"
-                                  : "white",
+                                expandedSKU === duplicate.sku ? "#f9fafb" : "white",
                             }}
                           >
                             <td
@@ -931,51 +1074,95 @@ export default function DuplicateSKUs() {
                                 {duplicate.count} variants
                               </span>
                             </td>
-                            <td
+                            {/* <td
                               style={{ padding: "12px", cursor: "pointer" }}
                               onClick={() => toggleExpand(duplicate.sku)}
                             >
                               <s-text tone="critical" size="small">
                                 ⚠️ Needs attention
                               </s-text>
-                            </td>
+                            </td> */}
                             <td style={{ padding: "12px" }}>
-                              <button
-                                type="button"
-                                onClick={(e) => {
-                                  e.stopPropagation();
-                                  handleRemoveSkuClick(
-                                    duplicate.sku,
-                                    duplicate.count
-                                  );
-                                }}
-                                disabled={showModal}
+                              <div
                                 style={{
-                                  backgroundColor: showModal
-                                    ? "#9ca3af"
-                                    : "#2563eb",
-                                  color: "white",
-                                  border: "none",
-                                  padding: "6px 12px",
-                                  borderRadius: "4px",
-                                  fontSize: "12px",
-                                  fontWeight: "500",
-                                  cursor: showModal
-                                    ? "not-allowed"
-                                    : "pointer",
-                                  transition: "background-color 0.2s",
-                                }}
-                                onMouseEnter={(e) => {
-                                  if (!showModal)
-                                    e.target.style.backgroundColor = "#1d4ed8";
-                                }}
-                                onMouseLeave={(e) => {
-                                  if (!showModal)
-                                    e.target.style.backgroundColor = "#2563eb";
+                                  display: "flex",
+                                  gap: "8px",
+                                  flexWrap: "wrap",
                                 }}
                               >
-                                Clear SKU from Variants
-                              </button>
+                                <button
+                                  type="button"
+                                  onClick={(e) => {
+                                    e.stopPropagation();
+                                    handleReassignSkuClick(
+                                      duplicate.sku,
+                                      duplicate.count
+                                    );
+                                  }}
+                                  disabled={showModal}
+                                  style={{
+                                    backgroundColor: showModal
+                                      ? "#9ca3af"
+                                      : "#10b981",
+                                    color: "white",
+                                    border: "none",
+                                    padding: "6px 12px",
+                                    borderRadius: "4px",
+                                    fontSize: "12px",
+                                    fontWeight: "500",
+                                    cursor: showModal
+                                      ? "not-allowed"
+                                      : "pointer",
+                                    transition: "background-color 0.2s",
+                                  }}
+                                  onMouseEnter={(e) => {
+                                    if (!showModal)
+                                      e.target.style.backgroundColor = "#059669";
+                                  }}
+                                  onMouseLeave={(e) => {
+                                    if (!showModal)
+                                      e.target.style.backgroundColor = "#10b981";
+                                  }}
+                                >
+                                  Re-assign SKUs
+                                </button>
+                                <button
+                                  type="button"
+                                  onClick={(e) => {
+                                    e.stopPropagation();
+                                    handleRemoveSkuClick(
+                                      duplicate.sku,
+                                      duplicate.count
+                                    );
+                                  }}
+                                  disabled={showModal}
+                                  style={{
+                                    backgroundColor: showModal
+                                      ? "#9ca3af"
+                                      : "#2563eb",
+                                    color: "white",
+                                    border: "none",
+                                    padding: "6px 12px",
+                                    borderRadius: "4px",
+                                    fontSize: "12px",
+                                    fontWeight: "500",
+                                    cursor: showModal
+                                      ? "not-allowed"
+                                      : "pointer",
+                                    transition: "background-color 0.2s",
+                                  }}
+                                  onMouseEnter={(e) => {
+                                    if (!showModal)
+                                      e.target.style.backgroundColor = "#1d4ed8";
+                                  }}
+                                  onMouseLeave={(e) => {
+                                    if (!showModal)
+                                      e.target.style.backgroundColor = "#2563eb";
+                                  }}
+                                >
+                                  Clear SKU from Variants
+                                </button>
+                              </div>
                             </td>
                           </tr>
 
@@ -1106,7 +1293,7 @@ export default function DuplicateSKUs() {
                                             style={{
                                               borderBottom:
                                                 vIndex <
-                                                  duplicate.variants.length - 1
+                                                duplicate.variants.length - 1
                                                   ? "1px solid #f3f4f6"
                                                   : "none",
                                             }}
