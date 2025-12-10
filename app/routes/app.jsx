@@ -22,7 +22,7 @@ export default function App() {
         <s-link href="/app/duplicate-skus">duplicate-skus</s-link>
         <s-link href="/app/duplicate-barcodes">duplicate-barcodes</s-link>
         <s-link href="/app/missing-barcodes">missing-barcodes</s-link>
-        
+        <s-link href="/app/missing-skus">missing-skus</s-link>
       </s-app-nav>
       <Outlet />
     </AppProvider>
