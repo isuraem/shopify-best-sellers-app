@@ -43,6 +43,7 @@ export async function loader({ request }) {
                   node {
                     id
                     sku
+                    barcode
                     title
                     inventoryQuantity
                     price
@@ -118,6 +119,7 @@ export async function loader({ request }) {
               productImage: product.images?.nodes?.[0]?.url || null,
               variantId: variant.id,
               variantTitle: variant.title,
+              barcode: variant.barcode || "N/A",
               inventoryQuantity: variant.inventoryQuantity || 0,
               price: variant.price,
               totalInventory: product.totalInventory,
@@ -369,6 +371,7 @@ export default function DuplicateSKUs() {
                                         <th style={{ textAlign: "left", padding: "10px", fontSize: "13px", fontWeight: "600" }}>Image</th>
                                         <th style={{ textAlign: "left", padding: "10px", fontSize: "13px", fontWeight: "600" }}>Product Name</th>
                                         <th style={{ textAlign: "left", padding: "10px", fontSize: "13px", fontWeight: "600" }}>Variant</th>
+                                        <th style={{ textAlign: "left", padding: "10px", fontSize: "13px", fontWeight: "600" }}>Barcode</th>
                                         <th style={{ textAlign: "left", padding: "10px", fontSize: "13px", fontWeight: "600" }}>Product ID</th>
                                         <th style={{ textAlign: "left", padding: "10px", fontSize: "13px", fontWeight: "600" }}>Variant ID</th>
                                         <th style={{ textAlign: "left", padding: "10px", fontSize: "13px", fontWeight: "600" }}>Inventory</th>
@@ -415,6 +418,9 @@ export default function DuplicateSKUs() {
                                           </td>
                                           <td style={{ padding: "10px", fontSize: "13px", color: "#6b7280" }}>
                                             {variant.variantTitle}
+                                          </td>
+                                          <td style={{ padding: "10px", fontSize: "12px", fontFamily: "monospace", color: "#6b7280" }}>
+                                            {variant.barcode}
                                           </td>
                                           <td style={{ padding: "10px", fontSize: "11px", fontFamily: "monospace", color: "#6b7280" }}>
                                             {variant.productId.replace("gid://shopify/Product/", "")}
