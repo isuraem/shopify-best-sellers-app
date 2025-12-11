@@ -197,16 +197,21 @@ export async function loader({ request }) {
   }
 }
 
-// Action to handle product deletion, SKU removal, and SKU re-assignment
+// Action to handle:
+// - product deletion (not used in UI anymore, but kept in case)
+// - SKU removal / re-assignment (single or multiple SKUs)
+// - VARIANT deletion (new bulk delete by selected variants)
 export async function action({ request }) {
   const { admin } = await authenticate.admin(request);
   const formData = await request.formData();
   const productId = formData.get("productId");
   const actionType = formData.get("actionType");
   const sku = formData.get("sku");
+  const skusJson = formData.get("skus");          // JSON array of SKUs for bulk
+  const variantGroupsJson = formData.get("variantGroups"); // JSON array of { productId, variantIds }
 
   // ============================
-  // DELETE PRODUCT
+  // DELETE PRODUCT (still supported, but not used by UI now)
   // ============================
   if (actionType === "deleteProduct") {
     if (!productId) {
@@ -318,74 +323,119 @@ export async function action({ request }) {
     }
   `;
 
-  // ============================
-  // REMOVE SKU FROM VARIANTS
-  // ============================
-  if (actionType === "removeSku") {
-    if (!sku) {
+  // ========================================================
+  // REMOVE SKU / RE-ASSIGN SKU (single or multiple SKUs)
+  // ========================================================
+  if (actionType === "removeSku" || actionType === "reassignSku") {
+    // Build list of SKUs to process (support both single + bulk)
+    let skuList = [];
+
+    if (skusJson) {
+      try {
+        const parsed = JSON.parse(skusJson);
+        if (Array.isArray(parsed)) {
+          skuList = parsed;
+        } else if (typeof parsed === "string") {
+          skuList = [parsed];
+        }
+      } catch (e) {
+        console.error("Failed to parse skus JSON:", skusJson, e);
+      }
+    } else if (sku) {
+      skuList = [sku];
+    }
+
+    skuList = skuList.map((s) => s && s.trim()).filter(Boolean);
+
+    if (skuList.length === 0) {
       return {
         success: false,
-        error: "No SKU provided",
+        error: "No SKU(s) provided",
       };
     }
 
-    try {
-      console.log(`🔧 Removing SKU "${sku}" from all matching variants...`);
+    const isReassign = actionType === "reassignSku";
 
-      let cursor = null;
-      let hasNextPage = true;
+    try {
+      console.log(
+        `${isReassign ? "🔁 Re-assigning" : "🔧 Removing"} SKUs for: ${skuList.join(
+          ", "
+        )}`
+      );
+
       const variantsByProduct = new Map();
 
-      while (hasNextPage) {
-        const response = await admin.graphql(VARIANTS_BY_SKU_QUERY, {
-          variables: {
-            query: `sku:${sku}`,
-            cursor,
-          },
-        });
+      // Collect variants for all SKUs
+      for (const currentSku of skuList) {
+        let cursor = null;
+        let hasNextPage = true;
 
-        const json = await response.json();
-
-        if (json.errors) {
-          console.error("GraphQL errors while searching variants by SKU:", json.errors);
-          return {
-            success: false,
-            error: `GraphQL search error: ${json.errors[0].message}`,
-          };
-        }
-
-        const conn = json.data?.productVariants;
-        if (!conn) break;
-
-        const edges = conn.edges || [];
-        for (const edge of edges) {
-          const node = edge.node;
-          if (!node?.sku) continue;
-          if (node.sku.trim() !== sku) continue;
-
-          const productIdForVariant = node.product.id;
-
-          if (!variantsByProduct.has(productIdForVariant)) {
-            variantsByProduct.set(productIdForVariant, []);
-          }
-
-          variantsByProduct.get(productIdForVariant).push({
-            id: node.id,
-            inventoryItem: {
-              sku: "", // clear SKU
+        while (hasNextPage) {
+          const response = await admin.graphql(VARIANTS_BY_SKU_QUERY, {
+            variables: {
+              query: `sku:${currentSku}`,
+              cursor,
             },
           });
-        }
 
-        hasNextPage = conn.pageInfo?.hasNextPage;
-        cursor = conn.pageInfo?.endCursor || null;
+          const json = await response.json();
+
+          if (json.errors) {
+            console.error(
+              `GraphQL errors while searching variants by SKU "${currentSku}":`,
+              json.errors
+            );
+            return {
+              success: false,
+              error: `GraphQL search error: ${json.errors[0].message}`,
+            };
+          }
+
+          const conn = json.data?.productVariants;
+          if (!conn) break;
+
+          const edges = conn.edges || [];
+          for (const edge of edges) {
+            const node = edge.node;
+            if (!node?.sku) continue;
+            if (node.sku.trim() !== currentSku) continue;
+
+            const productIdForVariant = node.product.id;
+
+            if (!variantsByProduct.has(productIdForVariant)) {
+              variantsByProduct.set(productIdForVariant, []);
+            }
+
+            let newSkuValue = "";
+
+            if (isReassign) {
+              // Extract numeric part of variant ID for pattern IC-{variantID}
+              const variantGid = node.id; // gid://shopify/ProductVariant/1234567890
+              const numericId = variantGid.split("/").pop();
+              newSkuValue = `IC-${numericId}`;
+            } else {
+              // remove: clear SKU
+              newSkuValue = "";
+            }
+
+            variantsByProduct.get(productIdForVariant).push({
+              id: node.id,
+              inventoryItem: {
+                sku: newSkuValue,
+              },
+            });
+          }
+
+          hasNextPage = conn.pageInfo?.hasNextPage;
+          cursor = conn.pageInfo?.endCursor || null;
+        }
       }
 
       if (variantsByProduct.size === 0) {
-        console.log(`No variants found with SKU "${sku}"`);
+        console.log(`No variants found for SKUs: ${skuList.join(", ")}`);
         return {
           success: false,
-          error: `No variants found with SKU "${sku}"`,
+          error: `No variants found for selected SKU(s)`,
         };
       }
 
@@ -403,7 +453,7 @@ export async function action({ request }) {
 
         if (json.errors) {
           console.error(
-            `GraphQL errors while clearing SKU for product ${productIdForVariant}:`,
+            `GraphQL errors while bulk-updating SKUs for product ${productIdForVariant}:`,
             json.errors
           );
           return {
@@ -427,106 +477,98 @@ export async function action({ request }) {
       }
 
       console.log(
-        `✅ Removed SKU "${sku}" from ${totalUpdated} variants across ${variantsByProduct.size} product(s)`
+        `✅ ${
+          isReassign ? "Re-assigned" : "Removed"
+        } SKUs for ${totalUpdated} variants across ${
+          variantsByProduct.size
+        } product(s) for SKUs: ${skuList.join(", ")}`
       );
 
       return {
         success: true,
-        clearedSku: sku,
+        mode: isReassign ? "reassign" : "remove",
+        skus: skuList,
         variantsUpdated: totalUpdated,
       };
     } catch (error) {
-      console.error("Error removing SKU:", error);
+      console.error(
+        `Error ${isReassign ? "re-assigning" : "removing"} SKUs:`,
+        error
+      );
       return {
         success: false,
-        error: `Error removing SKU: ${error.message}`,
+        error: `Error ${isReassign ? "re-assigning" : "removing"} SKUs: ${
+          error.message
+        }`,
       };
     }
   }
 
-  // ============================
-  // RE-ASSIGN SKUs (ic-{variantID})
-  // ============================
-  if (actionType === "reassignSku") {
-    if (!sku) {
+  // ========================================================
+  // DELETE VARIANTS (bulk by product using productVariantsBulkDelete)
+  // ========================================================
+  if (actionType === "deleteVariants") {
+    let variantGroups = [];
+
+    if (variantGroupsJson) {
+      try {
+        const parsed = JSON.parse(variantGroupsJson);
+        if (Array.isArray(parsed)) {
+          variantGroups = parsed;
+        }
+      } catch (e) {
+        console.error("Failed to parse variantGroups JSON:", variantGroupsJson, e);
+      }
+    }
+
+    // Each group should look like: { productId: string, variantIds: string[] }
+    variantGroups = variantGroups
+      .filter(
+        (g) =>
+          g &&
+          typeof g.productId === "string" &&
+          Array.isArray(g.variantIds) &&
+          g.variantIds.length > 0
+      )
+      .map((g) => ({
+        productId: g.productId.trim(),
+        variantIds: g.variantIds.map((id) => id && id.trim()).filter(Boolean),
+      }));
+
+    if (variantGroups.length === 0) {
       return {
         success: false,
-        error: "No SKU provided",
+        error: "No variant groups provided for deletion",
       };
     }
 
     try {
-      console.log(`🔁 Re-assigning SKU "${sku}" to pattern ic-{variantID}...`);
+      console.log(
+        `🗑️ Deleting variants with productVariantsBulkDelete for ${variantGroups.length} product(s)...`
+      );
 
-      let cursor = null;
-      let hasNextPage = true;
-      const variantsByProduct = new Map();
-
-      while (hasNextPage) {
-        const response = await admin.graphql(VARIANTS_BY_SKU_QUERY, {
-          variables: {
-            query: `sku:${sku}`,
-            cursor,
-          },
-        });
-
-        const json = await response.json();
-
-        if (json.errors) {
-          console.error("GraphQL errors while searching variants by SKU:", json.errors);
-          return {
-            success: false,
-            error: `GraphQL search error: ${json.errors[0].message}`,
-          };
-        }
-
-        const conn = json.data?.productVariants;
-        if (!conn) break;
-
-        const edges = conn.edges || [];
-        for (const edge of edges) {
-          const node = edge.node;
-          if (!node?.sku) continue;
-          if (node.sku.trim() !== sku) continue;
-
-          const productIdForVariant = node.product.id;
-
-          if (!variantsByProduct.has(productIdForVariant)) {
-            variantsByProduct.set(productIdForVariant, []);
+      const BULK_DELETE_VARIANTS_MUTATION = `#graphql
+        mutation bulkDeleteProductVariants($productId: ID!, $variantsIds: [ID!]!) {
+          productVariantsBulkDelete(productId: $productId, variantsIds: $variantsIds) {
+            product {
+              id
+              title
+            }
+            userErrors {
+              field
+              message
+            }
           }
-
-          // Extract numeric part of variant ID for pattern ic-{variantID}
-          const variantGid = node.id; // gid://shopify/ProductVariant/1234567890
-          const numericId = variantGid.split("/").pop();
-          const newSku = `IC-${numericId}`;
-
-          variantsByProduct.get(productIdForVariant).push({
-            id: node.id,
-            inventoryItem: {
-              sku: newSku,
-            },
-          });
         }
+      `;
 
-        hasNextPage = conn.pageInfo?.hasNextPage;
-        cursor = conn.pageInfo?.endCursor || null;
-      }
+      let totalDeleted = 0;
 
-      if (variantsByProduct.size === 0) {
-        console.log(`No variants found with SKU "${sku}"`);
-        return {
-          success: false,
-          error: `No variants found with SKU "${sku}"`,
-        };
-      }
-
-      let totalUpdated = 0;
-
-      for (const [productIdForVariant, variantInputs] of variantsByProduct.entries()) {
-        const response = await admin.graphql(BULK_UPDATE_MUTATION, {
+      for (const group of variantGroups) {
+        const response = await admin.graphql(BULK_DELETE_VARIANTS_MUTATION, {
           variables: {
-            productId: productIdForVariant,
-            variants: variantInputs,
+            productId: group.productId,
+            variantsIds: group.variantIds,
           },
         });
 
@@ -534,43 +576,40 @@ export async function action({ request }) {
 
         if (json.errors) {
           console.error(
-            `GraphQL errors while re-assigning SKU for product ${productIdForVariant}:`,
+            `GraphQL errors while bulk deleting variants for product ${group.productId}:`,
             json.errors
           );
           return {
             success: false,
-            error: `GraphQL bulk update error: ${json.errors[0].message}`,
+            error: `GraphQL delete error: ${json.errors[0].message}`,
           };
         }
 
-        const payload = json.data?.productVariantsBulkUpdate;
+        const payload = json.data?.productVariantsBulkDelete;
         const userErrors = payload?.userErrors || [];
 
         if (userErrors.length > 0) {
-          console.error("Bulk update userErrors:", userErrors);
+          console.error("productVariantsBulkDelete userErrors:", userErrors);
           return {
             success: false,
             error: userErrors[0].message,
           };
         }
 
-        totalUpdated += payload?.productVariants?.length || 0;
+        totalDeleted += group.variantIds.length;
       }
 
-      console.log(
-        `✅ Re-assigned SKU "${sku}" to ic-{variantID} pattern on ${totalUpdated} variants across ${variantsByProduct.size} product(s)`
-      );
+      console.log(`✅ Deleted ${totalDeleted} variant(s) across ${variantGroups.length} product(s).`);
 
       return {
         success: true,
-        reassignBaseSku: sku,
-        variantsUpdated: totalUpdated,
+        deletedVariants: totalDeleted,
       };
     } catch (error) {
-      console.error("Error re-assigning SKU:", error);
+      console.error("Error deleting variants:", error);
       return {
         success: false,
-        error: `Error re-assigning SKU: ${error.message}`,
+        error: `Error deleting variants: ${error.message}`,
       };
     }
   }
@@ -583,20 +622,33 @@ export async function action({ request }) {
 
 // Default export for the component
 export default function DuplicateSKUs() {
-  const { duplicates, totalProductsScanned, totalVariantsScanned, totalUniqueSKUs, error } =
-    useLoaderData();
+  const {
+    duplicates,
+    totalProductsScanned,
+    totalVariantsScanned,
+    totalUniqueSKUs,
+    error,
+  } = useLoaderData();
   const navigation = useNavigation();
   const fetcher = useFetcher();
   const revalidator = useRevalidator();
 
   const [expandedSKU, setExpandedSKU] = useState(null);
 
+  // Checkbox selection (multi-SKU for bulk SKU operations)
+  const [selectedSkus, setSelectedSkus] = useState([]);
+
+  // Variant selection, grouped by SKU: { [sku: string]: string[] variantIds }
+  const [selectedVariantsBySku, setSelectedVariantsBySku] = useState({});
+
   // Modal states
   const [showModal, setShowModal] = useState(false);
   const [modalState, setModalState] = useState("confirm"); // "confirm", "deleting"
-  const [modalAction, setModalAction] = useState(null); // "deleteProduct" | "removeSku" | "reassignSku"
+  // "removeSku" | "reassignSku" | "deleteVariants" | "deleteProduct" (kept for completeness)
+  const [modalAction, setModalAction] = useState(null);
   const [selectedProduct, setSelectedProduct] = useState(null);
-  const [selectedSku, setSelectedSku] = useState(null);
+  const [selectedSkuInfo, setSelectedSkuInfo] = useState(null); // { skus: string[], totalVariants: number }
+  const [selectedVariantInfo, setSelectedVariantInfo] = useState(null); // { sku, variantIds, variantGroups, count }
 
   const isLoading = navigation.state === "loading";
 
@@ -604,26 +656,138 @@ export default function DuplicateSKUs() {
     setExpandedSKU(expandedSKU === sku ? null : sku);
   };
 
-  const handleDeleteClick = (productId, productTitle) => {
-    setSelectedProduct({ productId, productTitle });
-    setSelectedSku(null);
-    setModalAction("deleteProduct");
-    setModalState("confirm");
-    setShowModal(true);
+  // Helpers for SKU selection
+  const isSkuSelected = (sku) => selectedSkus.includes(sku);
+
+  const toggleSkuSelection = (sku) => {
+    setSelectedSkus((prev) =>
+      prev.includes(sku) ? prev.filter((s) => s !== sku) : [...prev, sku]
+    );
   };
 
-  const handleRemoveSkuClick = (sku, count) => {
-    setSelectedSku({ sku, count });
+  const selectAllSkus = () => {
+    setSelectedSkus(duplicates.map((d) => d.sku));
+  };
+
+  const clearAllSkus = () => {
+    setSelectedSkus([]);
+  };
+
+  const allSelected =
+    duplicates.length > 0 && selectedSkus.length === duplicates.length;
+  const someSelected =
+    selectedSkus.length > 0 && selectedSkus.length < duplicates.length;
+
+  // Build info for selected SKUs (for modal text)
+  const buildSelectedSkuInfo = () => {
+    const selectedDuplicates = duplicates.filter((d) =>
+      selectedSkus.includes(d.sku)
+    );
+    const totalVariants = selectedDuplicates.reduce(
+      (sum, d) => sum + d.count,
+      0
+    );
+    const skus = selectedDuplicates.map((d) => d.sku);
+    return {
+      skus,
+      totalVariants,
+    };
+  };
+
+  // Helpers for variant selection per SKU
+  const getSelectedVariantsForSku = (sku) =>
+    selectedVariantsBySku[sku] || [];
+
+  const isVariantSelected = (sku, variantId) =>
+    (selectedVariantsBySku[sku] || []).includes(variantId);
+
+  const toggleVariantSelection = (sku, variantId) => {
+    setSelectedVariantsBySku((prev) => {
+      const current = prev[sku] || [];
+      let nextForSku;
+      if (current.includes(variantId)) {
+        nextForSku = current.filter((id) => id !== variantId);
+      } else {
+        nextForSku = [...current, variantId];
+      }
+      return {
+        ...prev,
+        [sku]: nextForSku,
+      };
+    });
+  };
+
+  const clearSelectedVariantsForSku = (sku) => {
+    setSelectedVariantsBySku((prev) => {
+      const copy = { ...prev };
+      delete copy[sku];
+      return copy;
+    });
+  };
+
+  // Bulk Clear SKUs (by selected SKUs)
+  const handleBulkRemoveSkuClick = () => {
+    const info = buildSelectedSkuInfo();
+    if (!info.skus.length) return;
+    setSelectedSkuInfo(info);
     setSelectedProduct(null);
+    setSelectedVariantInfo(null);
     setModalAction("removeSku");
     setModalState("confirm");
     setShowModal(true);
   };
 
-  const handleReassignSkuClick = (sku, count) => {
-    setSelectedSku({ sku, count });
+  // Bulk Reassign SKUs (by selected SKUs)
+  const handleBulkReassignSkuClick = () => {
+    const info = buildSelectedSkuInfo();
+    if (!info.skus.length) return;
+    setSelectedSkuInfo(info);
     setSelectedProduct(null);
+    setSelectedVariantInfo(null);
     setModalAction("reassignSku");
+    setModalState("confirm");
+    setShowModal(true);
+  };
+
+  // Bulk delete variants for a given SKU group
+  const handleBulkDeleteVariantsClick = (sku, variantIds) => {
+    if (!variantIds.length) return;
+
+    // Find the duplicate entry for this SKU
+    const duplicate = duplicates.find((d) => d.sku === sku);
+    if (!duplicate) return;
+
+    // Group selected variant IDs by productId (required by productVariantsBulkDelete)
+    const groupsMap = new Map();
+
+    variantIds.forEach((id) => {
+      const v = duplicate.variants.find((vv) => vv.variantId === id);
+      if (!v) return;
+      const productId = v.productId;
+      if (!groupsMap.has(productId)) {
+        groupsMap.set(productId, []);
+      }
+      groupsMap.get(productId).push(v.variantId);
+    });
+
+    const variantGroups = Array.from(groupsMap.entries()).map(
+      ([productId, ids]) => ({
+        productId,
+        variantIds: ids,
+      })
+    );
+
+    if (variantGroups.length === 0) return;
+
+    setSelectedVariantInfo({
+      sku,
+      variantIds,
+      variantGroups,
+      count: variantIds.length,
+    });
+    setSelectedProduct(null);
+    setSelectedSkuInfo(null);
+    setModalAction("deleteVariants");
     setModalState("confirm");
     setShowModal(true);
   };
@@ -638,21 +802,25 @@ export default function DuplicateSKUs() {
         },
         { method: "post" }
       );
-    } else if (modalAction === "removeSku" && selectedSku) {
+    } else if (
+      (modalAction === "removeSku" || modalAction === "reassignSku") &&
+      selectedSkuInfo &&
+      selectedSkuInfo.skus?.length
+    ) {
       setModalState("deleting");
       fetcher.submit(
         {
-          actionType: "removeSku",
-          sku: selectedSku.sku,
+          actionType: modalAction,
+          skus: JSON.stringify(selectedSkuInfo.skus),
         },
         { method: "post" }
       );
-    } else if (modalAction === "reassignSku" && selectedSku) {
+    } else if (modalAction === "deleteVariants" && selectedVariantInfo) {
       setModalState("deleting");
       fetcher.submit(
         {
-          actionType: "reassignSku",
-          sku: selectedSku.sku,
+          actionType: "deleteVariants",
+          variantGroups: JSON.stringify(selectedVariantInfo.variantGroups),
         },
         { method: "post" }
       );
@@ -662,7 +830,8 @@ export default function DuplicateSKUs() {
   const handleCancelDelete = () => {
     setShowModal(false);
     setSelectedProduct(null);
-    setSelectedSku(null);
+    setSelectedSkuInfo(null);
+    setSelectedVariantInfo(null);
     setModalAction(null);
     setModalState("confirm");
   };
@@ -673,16 +842,37 @@ export default function DuplicateSKUs() {
       if (fetcher.data.success) {
         // Operation successful, revalidate list in the background
         revalidator.revalidate();
+
+        // Clear selection based on action type
+        if (
+          modalAction === "removeSku" ||
+          modalAction === "reassignSku"
+        ) {
+          setSelectedSkus([]);
+        } else if (
+          modalAction === "deleteVariants" &&
+          selectedVariantInfo?.sku
+        ) {
+          clearSelectedVariantsForSku(selectedVariantInfo.sku);
+        }
       }
 
       // Close modal and reset state
       setShowModal(false);
       setSelectedProduct(null);
-      setSelectedSku(null);
+      setSelectedSkuInfo(null);
+      setSelectedVariantInfo(null);
       setModalAction(null);
       setModalState("confirm");
     }
-  }, [fetcher.state, fetcher.data, modalState, revalidator]);
+  }, [
+    fetcher.state,
+    fetcher.data,
+    modalState,
+    modalAction,
+    selectedVariantInfo,
+    revalidator,
+  ]);
 
   return (
     <s-page heading="Duplicate SKU Finder">
@@ -700,194 +890,246 @@ export default function DuplicateSKUs() {
         )}
 
         {/* Custom Confirmation/Loading Modal */}
-        {showModal && (selectedProduct || selectedSku) && (
-          <div
-            style={{
-              position: "fixed",
-              top: 0,
-              left: 0,
-              right: 0,
-              bottom: 0,
-              backgroundColor: "rgba(0, 0, 0, 0.6)",
-              display: "flex",
-              alignItems: "center",
-              justifyContent: "center",
-              zIndex: 9999,
-            }}
-            onClick={(e) => {
-              // Close modal if clicking outside (only in confirm state)
-              if (modalState === "confirm" && e.target === e.currentTarget) {
-                handleCancelDelete();
-              }
-            }}
-          >
+        {showModal &&
+          (selectedProduct || selectedSkuInfo || selectedVariantInfo) && (
             <div
               style={{
-                backgroundColor: "white",
-                padding: "40px",
-                borderRadius: "12px",
-                boxShadow: "0 20px 60px rgba(0, 0, 0, 0.3)",
-                minWidth: "450px",
-                maxWidth: "500px",
+                position: "fixed",
+                top: 0,
+                left: 0,
+                right: 0,
+                bottom: 0,
+                backgroundColor: "rgba(0, 0, 0, 0.6)",
+                display: "flex",
+                alignItems: "center",
+                justifyContent: "center",
+                zIndex: 9999,
+              }}
+              onClick={(e) => {
+                // Close modal if clicking outside (only in confirm state)
+                if (modalState === "confirm" && e.target === e.currentTarget) {
+                  handleCancelDelete();
+                }
               }}
             >
-              {/* Confirmation State */}
-              {modalState === "confirm" && (
-                <>
-                  <div style={{ textAlign: "center", marginBottom: "24px" }}>
+              <div
+                style={{
+                  backgroundColor: "white",
+                  padding: "40px",
+                  borderRadius: "12px",
+                  boxShadow: "0 20px 60px rgba(0, 0, 0, 0.3)",
+                  minWidth: "450px",
+                  maxWidth: "500px",
+                }}
+              >
+                {/* Confirmation State */}
+                {modalState === "confirm" && (
+                  <>
+                    <div style={{ textAlign: "center", marginBottom: "24px" }}>
+                      <div
+                        style={{
+                          fontSize: "48px",
+                          marginBottom: "16px",
+                        }}
+                      >
+                        ⚠️
+                      </div>
+                      <s-heading size="large">
+                        {modalAction === "deleteProduct"
+                          ? "Delete Product?"
+                          : modalAction === "removeSku"
+                          ? "Clear SKU from Variants?"
+                          : modalAction === "reassignSku"
+                          ? "Re-assign SKUs?"
+                          : "Delete Variants?"}
+                      </s-heading>
+                    </div>
+
                     <div
                       style={{
-                        fontSize: "48px",
-                        marginBottom: "16px",
+                        backgroundColor: "#f9fafb",
+                        padding: "16px",
+                        borderRadius: "8px",
+                        marginBottom: "24px",
                       }}
                     >
-                      ⚠️
-                    </div>
-                    <s-heading size="large">
-                      {modalAction === "deleteProduct"
-                        ? "Delete Product?"
-                        : modalAction === "removeSku"
-                        ? "Remove SKU from Variants?"
-                        : "Re-assign SKUs?"}
-                    </s-heading>
-                  </div>
-
-                  <div
-                    style={{
-                      backgroundColor: "#f9fafb",
-                      padding: "16px",
-                      borderRadius: "8px",
-                      marginBottom: "24px",
-                    }}
-                  >
-                    {modalAction === "deleteProduct" && selectedProduct && (
-                      <s-text>
-                        <strong>{selectedProduct.productTitle}</strong>
-                      </s-text>
-                    )}
-
-                    {modalAction !== "deleteProduct" && selectedSku && (
-                      <>
+                      {modalAction === "deleteProduct" && selectedProduct && (
                         <s-text>
-                          <strong>SKU: {selectedSku.sku}</strong>
+                          <strong>{selectedProduct.productTitle}</strong>
                         </s-text>
-                        <s-box marginTop="small">
-                          <s-text subdued size="small">
-                            This SKU is currently used by {selectedSku.count} variant
-                            {selectedSku.count !== 1 ? "s" : ""}.
+                      )}
+
+                      {modalAction !== "deleteProduct" && selectedSkuInfo && (
+                        <>
+                          <s-text>
+                            <strong>
+                              {selectedSkuInfo.skus.length} SKU
+                              {selectedSkuInfo.skus.length !== 1 ? "s" : ""} selected
+                            </strong>
                           </s-text>
-                        </s-box>
-                      </>
-                    )}
-                  </div>
+                          <s-box marginTop="small">
+                            <s-text subdued size="small">
+                              Total variants affected: {selectedSkuInfo.totalVariants}
+                            </s-text>
+                          </s-box>
+                          {selectedSkuInfo.skus.length > 0 && (
+                            <s-box marginTop="small">
+                              <s-text subdued size="small">
+                                {selectedSkuInfo.skus.slice(0, 5).join(", ")}
+                                {selectedSkuInfo.skus.length > 5
+                                  ? ` + ${selectedSkuInfo.skus.length - 5} more`
+                                  : ""}
+                              </s-text>
+                            </s-box>
+                          )}
+                        </>
+                      )}
 
-                  <s-box marginBottom="large">
-                    {modalAction === "deleteProduct" ? (
-                      <s-text subdued>
-                        This action cannot be undone. The product will be permanently
-                        removed from your store.
-                      </s-text>
-                    ) : modalAction === "removeSku" ? (
-                      <s-text subdued>
-                        This will clear this SKU from all matching variants. The variants
-                        will remain, but their SKU field will be empty.
-                      </s-text>
-                    ) : (
-                      <s-text subdued>
-                        This will assign new SKUs to all matching variants using the
-                        pattern <code>ic-{"{variantID}"}</code>.
-                      </s-text>
-                    )}
-                  </s-box>
+                      {modalAction === "deleteVariants" &&
+                        selectedVariantInfo &&
+                        !selectedSkuInfo && (
+                          <>
+                            <s-text>
+                              <strong>
+                                {selectedVariantInfo.count} variant
+                                {selectedVariantInfo.count !== 1 ? "s" : ""} selected
+                              </strong>
+                            </s-text>
+                            <s-box marginTop="small">
+                              <s-text subdued size="small">
+                                Under SKU: {selectedVariantInfo.sku}
+                              </s-text>
+                            </s-box>
+                          </>
+                        )}
+                    </div>
 
-                  <div
-                    style={{
-                      display: "flex",
-                      gap: "12px",
-                      justifyContent: "flex-end",
-                    }}
-                  >
-                    <button
-                      onClick={handleCancelDelete}
-                      style={{
-                        backgroundColor: "#f3f4f6",
-                        color: "#374151",
-                        border: "none",
-                        padding: "10px 24px",
-                        borderRadius: "6px",
-                        fontSize: "14px",
-                        fontWeight: "500",
-                        cursor: "pointer",
-                        transition: "background-color 0.2s",
-                      }}
-                      onMouseEnter={(e) => {
-                        e.target.style.backgroundColor = "#e5e7eb";
-                      }}
-                      onMouseLeave={(e) => {
-                        e.target.style.backgroundColor = "#f3f4f6";
-                      }}
-                    >
-                      Cancel
-                    </button>
-                    <button
-                      onClick={handleConfirm}
-                      style={{
-                        backgroundColor: "#dc2626",
-                        color: "white",
-                        border: "none",
-                        padding: "10px 24px",
-                        borderRadius: "6px",
-                        fontSize: "14px",
-                        fontWeight: "500",
-                        cursor: "pointer",
-                        transition: "background-color 0.2s",
-                      }}
-                      onMouseEnter={(e) => {
-                        e.target.style.backgroundColor = "#b91c1c";
-                      }}
-                      onMouseLeave={(e) => {
-                        e.target.style.backgroundColor = "#dc2626";
-                      }}
-                    >
-                      {modalAction === "deleteProduct"
-                        ? "Yes, Delete Product"
-                        : modalAction === "removeSku"
-                        ? "Yes, Remove from Variants"
-                        : "Yes, Re-assign SKUs"}
-                    </button>
-                  </div>
-                </>
-              )}
-
-              {/* Deleting / Processing State */}
-              {modalState === "deleting" && (
-                <div style={{ textAlign: "center" }}>
-                  <s-spinner size="large" />
-                  <s-box marginTop="large">
-                    <s-heading size="medium">
-                      {modalAction === "deleteProduct"
-                        ? "Deleting Product..."
-                        : modalAction === "removeSku"
-                        ? "Removing SKU..."
-                        : "Re-assigning SKUs..."}
-                    </s-heading>
-                    <s-box marginTop="small">
-                      <s-text subdued>
-                        {modalAction === "deleteProduct" && selectedProduct
-                          ? `Removing "${selectedProduct.productTitle}" from your store`
-                          : modalAction === "removeSku" && selectedSku
-                          ? `Clearing SKU "${selectedSku.sku}" from matching variants`
-                          : modalAction === "reassignSku" && selectedSku
-                          ? `Assigning SKUs in pattern ic-{variantID} for duplicates of "${selectedSku.sku}"`
-                          : "Processing..."}
-                      </s-text>
+                    <s-box marginBottom="large">
+                      {modalAction === "deleteProduct" ? (
+                        <s-text subdued>
+                          This action cannot be undone. The product will be permanently
+                          removed from your store.
+                        </s-text>
+                      ) : modalAction === "removeSku" ? (
+                        <s-text subdued>
+                          This will clear the SKU field from all matching variants of the
+                          selected SKUs. The variants will remain, but their SKU will be
+                          empty.
+                        </s-text>
+                      ) : modalAction === "reassignSku" ? (
+                        <s-text subdued>
+                          This will assign new SKUs to all matching variants of the
+                          selected SKUs using the pattern{" "}
+                          <code>IC-{"{variantID}"}</code>.
+                        </s-text>
+                      ) : (
+                        <s-text subdued>
+                          This will permanently delete the selected variants from your
+                          store. This cannot be undone.
+                        </s-text>
+                      )}
                     </s-box>
-                  </s-box>
-                </div>
-              )}
+
+                    <div
+                      style={{
+                        display: "flex",
+                        gap: "12px",
+                        justifyContent: "flex-end",
+                      }}
+                    >
+                      <button
+                        onClick={handleCancelDelete}
+                        style={{
+                          backgroundColor: "#f3f4f6",
+                          color: "#374151",
+                          border: "none",
+                          padding: "10px 24px",
+                          borderRadius: "6px",
+                          fontSize: "14px",
+                          fontWeight: "500",
+                          cursor: "pointer",
+                          transition: "background-color 0.2s",
+                        }}
+                        onMouseEnter={(e) => {
+                          e.target.style.backgroundColor = "#e5e7eb";
+                        }}
+                        onMouseLeave={(e) => {
+                          e.target.style.backgroundColor = "#f3f4f6";
+                        }}
+                      >
+                        Cancel
+                      </button>
+                      <button
+                        onClick={handleConfirm}
+                        style={{
+                          backgroundColor: "#dc2626",
+                          color: "white",
+                          border: "none",
+                          padding: "10px 24px",
+                          borderRadius: "6px",
+                          fontSize: "14px",
+                          fontWeight: "500",
+                          cursor: "pointer",
+                          transition: "background-color 0.2s",
+                        }}
+                        onMouseEnter={(e) => {
+                          e.target.style.backgroundColor = "#b91c1c";
+                        }}
+                        onMouseLeave={(e) => {
+                          e.target.style.backgroundColor = "#dc2626";
+                        }}
+                      >
+                        {modalAction === "deleteProduct"
+                          ? "Yes, Delete Product"
+                          : modalAction === "removeSku"
+                          ? "Yes, Clear SKUs"
+                          : modalAction === "reassignSku"
+                          ? "Yes, Re-assign SKUs"
+                          : "Yes, Delete Variants"}
+                      </button>
+                    </div>
+                  </>
+                )}
+
+                {/* Deleting / Processing State */}
+                {modalState === "deleting" && (
+                  <div style={{ textAlign: "center" }}>
+                    <s-spinner size="large" />
+                    <s-box marginTop="large">
+                      <s-heading size="medium">
+                        {modalAction === "deleteProduct"
+                          ? "Deleting Product..."
+                          : modalAction === "removeSku"
+                          ? "Clearing SKUs..."
+                          : modalAction === "reassignSku"
+                          ? "Re-assigning SKUs..."
+                          : "Deleting Variants..."}
+                      </s-heading>
+                      <s-box marginTop="small">
+                        <s-text subdued>
+                          {modalAction === "deleteProduct" && selectedProduct
+                            ? `Removing "${selectedProduct.productTitle}" from your store`
+                            : modalAction === "removeSku" && selectedSkuInfo
+                            ? `Clearing SKUs for ${selectedSkuInfo.skus.length} duplicate SKU${
+                                selectedSkuInfo.skus.length !== 1 ? "s" : ""
+                              }`
+                            : modalAction === "reassignSku" && selectedSkuInfo
+                            ? `Assigning SKUs in pattern IC-{variantID} for ${selectedSkuInfo.skus.length} duplicate SKU${
+                                selectedSkuInfo.skus.length !== 1 ? "s" : ""
+                              }`
+                            : modalAction === "deleteVariants" && selectedVariantInfo
+                            ? `Deleting ${selectedVariantInfo.count} variant${
+                                selectedVariantInfo.count !== 1 ? "s" : ""
+                              } under SKU "${selectedVariantInfo.sku}"`
+                            : "Processing..."}
+                        </s-text>
+                      </s-box>
+                    </s-box>
+                  </div>
+                )}
+              </div>
             </div>
-          </div>
-        )}
+          )}
 
         {/* Loading State */}
         {isLoading ? (
@@ -989,9 +1231,105 @@ export default function DuplicateSKUs() {
                     {duplicates.length !== 1 ? "s" : ""}
                   </s-heading>
                   <s-text subdued>
-                    Click on any SKU to expand and see all variants using that SKU
+                    Select SKUs for bulk clear/re-assign, or expand a SKU to select and
+                    delete individual variants.
                   </s-text>
                 </s-box>
+
+                {/* Bulk actions bar for SKUs */}
+                {selectedSkus.length > 0 && (
+                  <s-box
+                    marginBottom="base"
+                    padding="small"
+                    borderWidth="base"
+                    borderRadius="base"
+                    background="subdued"
+                  >
+                    <div
+                      style={{
+                        display: "flex",
+                        alignItems: "center",
+                        justifyContent: "space-between",
+                        gap: "12px",
+                        flexWrap: "wrap",
+                      }}
+                    >
+                      <div>
+                        <s-text>
+                          <strong>{selectedSkus.length}</strong> SKU
+                          {selectedSkus.length !== 1 ? "s" : ""} selected
+                        </s-text>
+                      </div>
+                      <div style={{ display: "flex", gap: "8px", flexWrap: "wrap" }}>
+                        <button
+                          type="button"
+                          onClick={handleBulkReassignSkuClick}
+                          disabled={showModal}
+                          style={{
+                            backgroundColor: showModal ? "#9ca3af" : "#10b981",
+                            color: "white",
+                            border: "none",
+                            padding: "6px 12px",
+                            borderRadius: "4px",
+                            fontSize: "12px",
+                            fontWeight: "500",
+                            cursor: showModal ? "not-allowed" : "pointer",
+                            transition: "background-color 0.2s",
+                          }}
+                          onMouseEnter={(e) => {
+                            if (!showModal) e.target.style.backgroundColor = "#059669";
+                          }}
+                          onMouseLeave={(e) => {
+                            if (!showModal) e.target.style.backgroundColor = "#10b981";
+                          }}
+                        >
+                          Re-assign SKUs
+                        </button>
+                        <button
+                          type="button"
+                          onClick={handleBulkRemoveSkuClick}
+                          disabled={showModal}
+                          style={{
+                            backgroundColor: showModal ? "#9ca3af" : "#2563eb",
+                            color: "white",
+                            border: "none",
+                            padding: "6px 12px",
+                            borderRadius: "4px",
+                            fontSize: "12px",
+                            fontWeight: "500",
+                            cursor: showModal ? "not-allowed" : "pointer",
+                            transition: "background-color 0.2s",
+                          }}
+                          onMouseEnter={(e) => {
+                            if (!showModal) e.target.style.backgroundColor = "#1d4ed8";
+                          }}
+                          onMouseLeave={(e) => {
+                            if (!showModal) e.target.style.backgroundColor = "#2563eb";
+                          }}
+                        >
+                          Clear SKU from Variants
+                        </button>
+                        <button
+                          type="button"
+                          onClick={clearAllSkus}
+                          style={{
+                            backgroundColor: "transparent",
+                            color: "#6b7280",
+                            border: "none",
+                            padding: "6px 8px",
+                            borderRadius: "4px",
+                            fontSize: "12px",
+                            fontWeight: "500",
+                            cursor: "pointer",
+                            textDecoration: "underline",
+                          }}
+                        >
+                          Clear selection
+                        </button>
+                      </div>
+                    </div>
+                  </s-box>
+                )}
 
                 <s-box
                   marginTop="base"
@@ -1002,7 +1340,32 @@ export default function DuplicateSKUs() {
                 >
                   <table style={{ width: "100%", borderCollapse: "collapse" }}>
                     <thead>
-                      <tr style={{ borderBottom: "2px solid #ddd" }}>
+                      <tr style={{ borderBottom: "2px solid " +
+                        "#ddd" }}>
+                        <th
+                          style={{
+                            textAlign: "center",
+                            padding: "12px",
+                            width: "40px",
+                          }}
+                        >
+                          <input
+                            type="checkbox"
+                            checked={allSelected}
+                            ref={(input) => {
+                              if (input) {
+                                input.indeterminate = someSelected;
+                              }
+                            }}
+                            onChange={(e) => {
+                              if (e.target.checked) {
+                                selectAllSkus();
+                              } else {
+                                clearAllSkus();
+                              }
+                            }}
+                          />
+                        </th>
                         <th
                           style={{
                             textAlign: "left",
@@ -1014,12 +1377,7 @@ export default function DuplicateSKUs() {
                         <th style={{ textAlign: "left", padding: "12px" }}>
                           Duplicate Count
                         </th>
-                        {/* <th style={{ textAlign: "left", padding: "12px" }}>
-                          Status
-                        </th> */}
-                        <th style={{ textAlign: "left", padding: "12px" }}>
-                          Actions
-                        </th>
+                        <th style={{ textAlign: "left", padding: "12px" }}>Status</th>
                       </tr>
                     </thead>
 
@@ -1034,6 +1392,22 @@ export default function DuplicateSKUs() {
                                 expandedSKU === duplicate.sku ? "#f9fafb" : "white",
                             }}
                           >
+                            {/* Checkbox */}
+                            <td
+                              style={{
+                                padding: "12px",
+                                textAlign: "center",
+                              }}
+                              onClick={(e) => e.stopPropagation()}
+                            >
+                              <input
+                                type="checkbox"
+                                checked={isSkuSelected(duplicate.sku)}
+                                onChange={() => toggleSkuSelection(duplicate.sku)}
+                              />
+                            </td>
+
+                            {/* Expand icon */}
                             <td
                               style={{
                                 padding: "12px",
@@ -1046,6 +1420,8 @@ export default function DuplicateSKUs() {
                                 {expandedSKU === duplicate.sku ? "▼" : "▶"}
                               </span>
                             </td>
+
+                            {/* SKU */}
                             <td
                               style={{
                                 padding: "12px",
@@ -1057,6 +1433,8 @@ export default function DuplicateSKUs() {
                             >
                               {duplicate.sku}
                             </td>
+
+                            {/* Count */}
                             <td
                               style={{ padding: "12px", cursor: "pointer" }}
                               onClick={() => toggleExpand(duplicate.sku)}
@@ -1074,95 +1452,15 @@ export default function DuplicateSKUs() {
                                 {duplicate.count} variants
                               </span>
                             </td>
-                            {/* <td
+
+                            {/* Status */}
+                            <td
                               style={{ padding: "12px", cursor: "pointer" }}
                               onClick={() => toggleExpand(duplicate.sku)}
                             >
                               <s-text tone="critical" size="small">
                                 ⚠️ Needs attention
                               </s-text>
-                            </td> */}
-                            <td style={{ padding: "12px" }}>
-                              <div
-                                style={{
-                                  display: "flex",
-                                  gap: "8px",
-                                  flexWrap: "wrap",
-                                }}
-                              >
-                                <button
-                                  type="button"
-                                  onClick={(e) => {
-                                    e.stopPropagation();
-                                    handleReassignSkuClick(
-                                      duplicate.sku,
-                                      duplicate.count
-                                    );
-                                  }}
-                                  disabled={showModal}
-                                  style={{
-                                    backgroundColor: showModal
-                                      ? "#9ca3af"
-                                      : "#10b981",
-                                    color: "white",
-                                    border: "none",
-                                    padding: "6px 12px",
-                                    borderRadius: "4px",
-                                    fontSize: "12px",
-                                    fontWeight: "500",
-                                    cursor: showModal
-                                      ? "not-allowed"
-                                      : "pointer",
-                                    transition: "background-color 0.2s",
-                                  }}
-                                  onMouseEnter={(e) => {
-                                    if (!showModal)
-                                      e.target.style.backgroundColor = "#059669";
-                                  }}
-                                  onMouseLeave={(e) => {
-                                    if (!showModal)
-                                      e.target.style.backgroundColor = "#10b981";
-                                  }}
-                                >
-                                  Re-assign SKUs
-                                </button>
-                                <button
-                                  type="button"
-                                  onClick={(e) => {
-                                    e.stopPropagation();
-                                    handleRemoveSkuClick(
-                                      duplicate.sku,
-                                      duplicate.count
-                                    );
-                                  }}
-                                  disabled={showModal}
-                                  style={{
-                                    backgroundColor: showModal
-                                      ? "#9ca3af"
-                                      : "#2563eb",
-                                    color: "white",
-                                    border: "none",
-                                    padding: "6px 12px",
-                                    borderRadius: "4px",
-                                    fontSize: "12px",
-                                    fontWeight: "500",
-                                    cursor: showModal
-                                      ? "not-allowed"
-                                      : "pointer",
-                                    transition: "background-color 0.2s",
-                                  }}
-                                  onMouseEnter={(e) => {
-                                    if (!showModal)
-                                      e.target.style.backgroundColor = "#1d4ed8";
-                                  }}
-                                  onMouseLeave={(e) => {
-                                    if (!showModal)
-                                      e.target.style.backgroundColor = "#2563eb";
-                                  }}
-                                >
-                                  Clear SKU from Variants
-                                </button>
-                              </div>
                             </td>
                           </tr>
 
@@ -1182,6 +1480,112 @@ export default function DuplicateSKUs() {
                                     paddingLeft: "60px",
                                   }}
                                 >
+                                  {/* Bulk bar for variant selection under this SKU */}
+                                  {getSelectedVariantsForSku(duplicate.sku).length >
+                                    0 && (
+                                    <s-box
+                                      marginBottom="small"
+                                      padding="small"
+                                      borderWidth="base"
+                                      borderRadius="base"
+                                      background="subdued"
+                                    >
+                                      <div
+                                        style={{
+                                          display: "flex",
+                                          alignItems: "center",
+                                          justifyContent: "space-between",
+                                          gap: "8px",
+                                          flexWrap: "wrap",
+                                        }}
+                                      >
+                                        <s-text size="small">
+                                          <strong>
+                                            {
+                                              getSelectedVariantsForSku(
+                                                duplicate.sku
+                                              ).length
+                                            }
+                                          </strong>{" "}
+                                          variant
+                                          {getSelectedVariantsForSku(duplicate.sku)
+                                            .length !== 1
+                                            ? "s"
+                                            : ""}{" "}
+                                          selected under SKU {duplicate.sku}
+                                        </s-text>
+                                        <div
+                                          style={{
+                                            display: "flex",
+                                            gap: "8px",
+                                            flexWrap: "wrap",
+                                          }}
+                                        >
+                                          <button
+                                            type="button"
+                                            onClick={() =>
+                                              handleBulkDeleteVariantsClick(
+                                                duplicate.sku,
+                                                getSelectedVariantsForSku(
+                                                  duplicate.sku
+                                                )
+                                              )
+                                            }
+                                            disabled={showModal}
+                                            style={{
+                                              backgroundColor: showModal
+                                                ? "#9ca3af"
+                                                : "#dc2626",
+                                              color: "white",
+                                              border: "none",
+                                              padding: "6px 12px",
+                                              borderRadius: "4px",
+                                              fontSize: "12px",
+                                              fontWeight: "500",
+                                              cursor: showModal
+                                                ? "not-allowed"
+                                                : "pointer",
+                                              transition: "background-color 0.2s",
+                                            }}
+                                            onMouseEnter={(e) => {
+                                              if (!showModal)
+                                                e.target.style.backgroundColor =
+                                                  "#b91c1c";
+                                            }}
+                                            onMouseLeave={(e) => {
+                                              if (!showModal)
+                                                e.target.style.backgroundColor =
+                                                  "#dc2626";
+                                            }}
+                                          >
+                                            Delete selected variants
+                                          </button>
+                                          <button
+                                            type="button"
+                                            onClick={() =>
+                                              clearSelectedVariantsForSku(
+                                                duplicate.sku
+                                              )
+                                            }
+                                            style={{
+                                              backgroundColor: "transparent",
+                                              color: "#6b7280",
+                                              border: "none",
+                                              padding: "4px 8px",
+                                              borderRadius: "4px",
+                                              fontSize: "11px",
+                                              fontWeight: "500",
+                                              cursor: "pointer",
+                                              textDecoration: "underline",
+                                            }}
+                                          >
+                                            Clear selection
+                                          </button>
+                                        </div>
+                                      </div>
+                                    </s-box>
+                                  )}
+
                                   <table
                                     style={{
                                       width: "100%",
@@ -1193,6 +1597,17 @@ export default function DuplicateSKUs() {
                                   >
                                     <thead>
                                       <tr style={{ backgroundColor: "#f3f4f6" }}>
+                                        <th
+                                          style={{
+                                            textAlign: "center",
+                                            padding: "10px",
+                                            fontSize: "13px",
+                                            fontWeight: "600",
+                                            width: "40px",
+                                          }}
+                                        >
+                                          {/* Variant checkbox column */}
+                                        </th>
                                         <th
                                           style={{
                                             textAlign: "left",
@@ -1273,181 +1688,145 @@ export default function DuplicateSKUs() {
                                         >
                                           Price
                                         </th>
-                                        <th
-                                          style={{
-                                            textAlign: "center",
-                                            padding: "10px",
-                                            fontSize: "13px",
-                                            fontWeight: "600",
-                                          }}
-                                        >
-                                          Actions
-                                        </th>
                                       </tr>
                                     </thead>
                                     <tbody>
-                                      {duplicate.variants.map(
-                                        (variant, vIndex) => (
-                                          <tr
-                                            key={variant.variantId}
+                                      {duplicate.variants.map((variant, vIndex) => (
+                                        <tr
+                                          key={variant.variantId}
+                                          style={{
+                                            borderBottom:
+                                              vIndex <
+                                              duplicate.variants.length - 1
+                                                ? "1px solid #f3f4f6"
+                                                : "none",
+                                          }}
+                                        >
+                                          {/* Variant checkbox */}
+                                          <td
                                             style={{
-                                              borderBottom:
-                                                vIndex <
-                                                duplicate.variants.length - 1
-                                                  ? "1px solid #f3f4f6"
-                                                  : "none",
+                                              padding: "10px",
+                                              textAlign: "center",
                                             }}
+                                            onClick={(e) => e.stopPropagation()}
                                           >
-                                            <td style={{ padding: "10px" }}>
-                                              {variant.productImage ? (
-                                                <img
-                                                  src={variant.productImage}
-                                                  width="40"
-                                                  height="40"
-                                                  style={{
-                                                    borderRadius: "4px",
-                                                    objectFit: "cover",
-                                                  }}
-                                                  alt={variant.productTitle}
-                                                />
-                                              ) : (
-                                                <div
-                                                  style={{
-                                                    width: "40px",
-                                                    height: "40px",
-                                                    backgroundColor: "#e5e7eb",
-                                                    borderRadius: "4px",
-                                                    display: "flex",
-                                                    alignItems: "center",
-                                                    justifyContent: "center",
-                                                    fontSize: "10px",
-                                                    color: "#6b7280",
-                                                  }}
-                                                >
-                                                  No img
-                                                </div>
+                                            <input
+                                              type="checkbox"
+                                              checked={isVariantSelected(
+                                                duplicate.sku,
+                                                variant.variantId
                                               )}
-                                            </td>
-                                            <td
-                                              style={{
-                                                padding: "10px",
-                                                fontSize: "13px",
-                                              }}
-                                            >
-                                              {variant.productTitle}
-                                            </td>
-                                            <td
-                                              style={{
-                                                padding: "10px",
-                                                fontSize: "13px",
-                                                color: "#6b7280",
-                                              }}
-                                            >
-                                              {variant.variantTitle}
-                                            </td>
-                                            <td
-                                              style={{
-                                                padding: "10px",
-                                                fontSize: "12px",
-                                                fontFamily: "monospace",
-                                                color: "#6b7280",
-                                              }}
-                                            >
-                                              {variant.barcode}
-                                            </td>
-                                            <td
-                                              style={{
-                                                padding: "10px",
-                                                fontSize: "11px",
-                                                fontFamily: "monospace",
-                                                color: "#6b7280",
-                                              }}
-                                            >
-                                              {variant.productId.replace(
-                                                "gid://shopify/Product/",
-                                                ""
-                                              )}
-                                            </td>
-                                            <td
-                                              style={{
-                                                padding: "10px",
-                                                fontSize: "11px",
-                                                fontFamily: "monospace",
-                                                color: "#6b7280",
-                                              }}
-                                            >
-                                              {variant.variantId.replace(
-                                                "gid://shopify/ProductVariant/",
-                                                ""
-                                              )}
-                                            </td>
-                                            <td
-                                              style={{
-                                                padding: "10px",
-                                                fontSize: "13px",
-                                              }}
-                                            >
-                                              {variant.inventoryQuantity}
-                                            </td>
-                                            <td
-                                              style={{
-                                                padding: "10px",
-                                                fontSize: "13px",
-                                                fontWeight: "500",
-                                              }}
-                                            >
-                                              ${variant.price}
-                                            </td>
-                                            <td
-                                              style={{
-                                                padding: "10px",
-                                                textAlign: "center",
-                                              }}
-                                            >
-                                              <button
-                                                onClick={(e) => {
-                                                  e.stopPropagation();
-                                                  handleDeleteClick(
-                                                    variant.productId,
-                                                    variant.productTitle
-                                                  );
-                                                }}
-                                                disabled={showModal}
+                                              onChange={() =>
+                                                toggleVariantSelection(
+                                                  duplicate.sku,
+                                                  variant.variantId
+                                                )
+                                              }
+                                            />
+                                          </td>
+
+                                          <td style={{ padding: "10px" }}>
+                                            {variant.productImage ? (
+                                              <img
+                                                src={variant.productImage}
+                                                width="40"
+                                                height="40"
                                                 style={{
-                                                  backgroundColor: showModal
-                                                    ? "#9ca3af"
-                                                    : "#dc2626",
-                                                  color: "white",
-                                                  border: "none",
-                                                  padding: "6px 12px",
                                                   borderRadius: "4px",
-                                                  fontSize: "12px",
-                                                  fontWeight: "500",
-                                                  cursor: showModal
-                                                    ? "not-allowed"
-                                                    : "pointer",
-                                                  transition:
-                                                    "background-color 0.2s",
+                                                  objectFit: "cover",
                                                 }}
-                                                onMouseEnter={(e) => {
-                                                  if (!showModal) {
-                                                    e.target.style.backgroundColor =
-                                                      "#b91c1c";
-                                                  }
-                                                }}
-                                                onMouseLeave={(e) => {
-                                                  if (!showModal) {
-                                                    e.target.style.backgroundColor =
-                                                      "#dc2626";
-                                                  }
+                                                alt={variant.productTitle}
+                                              />
+                                            ) : (
+                                              <div
+                                                style={{
+                                                  width: "40px",
+                                                  height: "40px",
+                                                  backgroundColor: "#e5e7eb",
+                                                  borderRadius: "4px",
+                                                  display: "flex",
+                                                  alignItems: "center",
+                                                  justifyContent: "center",
+                                                  fontSize: "10px",
+                                                  color: "#6b7280",
                                                 }}
                                               >
-                                                🗑️ Delete Product
-                                              </button>
-                                            </td>
-                                          </tr>
-                                        )
-                                      )}
+                                                No img
+                                              </div>
+                                            )}
+                                          </td>
+                                          <td
+                                            style={{
+                                              padding: "10px",
+                                              fontSize: "13px",
+                                            }}
+                                          >
+                                            {variant.productTitle}
+                                          </td>
+                                          <td
+                                            style={{
+                                              padding: "10px",
+                                              fontSize: "13px",
+                                              color: "#6b7280",
+                                            }}
+                                          >
+                                            {variant.variantTitle}
+                                          </td>
+                                          <td
+                                            style={{
+                                              padding: "10px",
+                                              fontSize: "12px",
+                                              fontFamily: "monospace",
+                                              color: "#6b7280",
+                                            }}
+                                          >
+                                            {variant.barcode}
+                                          </td>
+                                          <td
+                                            style={{
+                                              padding: "10px",
+                                              fontSize: "11px",
+                                              fontFamily: "monospace",
+                                              color: "#6b7280",
+                                            }}
+                                          >
+                                            {variant.productId.replace(
+                                              "gid://shopify/Product/",
+                                              ""
+                                            )}
+                                          </td>
+                                          <td
+                                            style={{
+                                              padding: "10px",
+                                              fontSize: "11px",
+                                              fontFamily: "monospace",
+                                              color: "#6b7280",
+                                            }}
+                                          >
+                                            {variant.variantId.replace(
+                                              "gid://shopify/ProductVariant/",
+                                              ""
+                                            )}
+                                          </td>
+                                          <td
+                                            style={{
+                                              padding: "10px",
+                                              fontSize: "13px",
+                                            }}
+                                          >
+                                            {variant.inventoryQuantity}
+                                          </td>
+                                          <td
+                                            style={{
+                                              padding: "10px",
+                                              fontSize: "13px",
+                                              fontWeight: "500",
+                                            }}
+                                          >
+                                            ${variant.price}
+                                          </td>
+                                        </tr>
+                                      ))}
                                     </tbody>
                                   </table>
                                 </div>
