@@ -9,7 +9,7 @@ import { authenticate } from "../shopify.server";
 // Named export for the loader
 export async function loader({ request }) {
   const { admin } = await authenticate.admin(request);
-  
+
   // Just return admin for the action to use
   return { admin: true };
 }
@@ -31,7 +31,7 @@ export async function action({ request }) {
   try {
     // Parse CSV data
     const csvRows = JSON.parse(csvData);
-    
+
     console.log(`Processing ${csvRows.length} CSV rows...`);
 
     // Fetch all products from Shopify
@@ -163,7 +163,7 @@ export async function action({ request }) {
       } else {
         // SKU found in Shopify
         const shopifyBarcode = shopifyVariant.barcode;
-        
+
         // Normalize both barcodes for comparison
         const normalizedCsvGTIN = normalizeBarcode(csvGTIN);
         const normalizedShopifyBarcode = normalizeBarcode(shopifyBarcode);
@@ -264,29 +264,29 @@ export default function CSVComparison() {
       console.error("FileReader error:", error);
       alert("Error reading file");
     };
-    
+
     reader.onload = async (e) => {
       const text = e.target.result;
       console.log("CSV content loaded, length:", text.length);
-      
+
       try {
         // Better CSV parsing that handles commas inside quotes
         const lines = text.split(/\r?\n/);
         const headers = parseCSVLine(lines[0]);
-        
+
         console.log("CSV headers:", headers);
-        
+
         const rows = [];
         for (let i = 1; i < lines.length; i++) {
           if (!lines[i].trim()) continue;
-          
+
           const values = parseCSVLine(lines[i]);
           const row = {};
-          
+
           headers.forEach((header, index) => {
             row[header] = values[index] || "";
           });
-          
+
           // Only add rows that have a SKU
           if (row.SKU && row.SKU.trim()) {
             rows.push(row);
@@ -314,11 +314,11 @@ export default function CSVComparison() {
     const result = [];
     let current = '';
     let inQuotes = false;
-    
+
     for (let i = 0; i < line.length; i++) {
       const char = line[i];
       const nextChar = line[i + 1];
-      
+
       if (char === '"') {
         if (inQuotes && nextChar === '"') {
           // Escaped quote
@@ -336,11 +336,19 @@ export default function CSVComparison() {
         current += char;
       }
     }
-    
+
     // Add the last field
     result.push(current.trim());
-    
+
     return result;
+  };
+
+  // Add a reset function
+  const handleReset = () => {
+    setCSVFile(null);
+    setSelectedTab("skuNotFound");
+    // This will clear the fetcher data
+    fetcher.load("/app/csv-comparison");
   };
 
   return (
@@ -441,7 +449,7 @@ export default function CSVComparison() {
               </div>
 
               <s-box marginTop="base" style={{ textAlign: "center" }}>
-                <s-button onClick={() => window.location.reload()}>
+                <s-button onClick={handleReset}>
                   Upload Another CSV
                 </s-button>
               </s-box>
