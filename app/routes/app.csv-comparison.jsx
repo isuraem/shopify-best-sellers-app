@@ -15,6 +15,7 @@ export async function loader({ request }) {
 }
 
 // Action to handle CSV upload and comparison
+// Action to handle CSV upload and comparison
 export async function action({ request }) {
   const { admin } = await authenticate.admin(request);
   const formData = await request.formData();
@@ -124,6 +125,13 @@ export async function action({ request }) {
 
     console.log(`Fetched ${shopifyVariants.size} Shopify variants`);
 
+    // Helper function to normalize barcodes by removing leading zeros
+    const normalizeBarcode = (barcode) => {
+      if (!barcode) return null;
+      // Remove leading zeros
+      return barcode.replace(/^0+/, '') || '0'; // Keep at least one zero if all zeros
+    };
+
     // Compare CSV with Shopify data
     const results = {
       matched: [],
@@ -155,10 +163,14 @@ export async function action({ request }) {
       } else {
         // SKU found in Shopify
         const shopifyBarcode = shopifyVariant.barcode;
+        
+        // Normalize both barcodes for comparison
+        const normalizedCsvGTIN = normalizeBarcode(csvGTIN);
+        const normalizedShopifyBarcode = normalizeBarcode(shopifyBarcode);
 
-        if (csvGTIN && shopifyBarcode) {
-          if (csvGTIN === shopifyBarcode) {
-            // Perfect match
+        if (normalizedCsvGTIN && normalizedShopifyBarcode) {
+          if (normalizedCsvGTIN === normalizedShopifyBarcode) {
+            // Perfect match (after normalization)
             results.skuFoundBarcodeMatch.push({
               ...shopifyVariant,
               csvProduct: csvRow.Product,
@@ -166,7 +178,7 @@ export async function action({ request }) {
               csvQty: csvRow["Real Qty."] || csvRow["Est. Qty."],
             });
           } else {
-            // Barcode mismatch
+            // Barcode mismatch (even after normalization)
             results.barcodeMismatch.push({
               ...shopifyVariant,
               csvProduct: csvRow.Product,
@@ -175,7 +187,7 @@ export async function action({ request }) {
               csvQty: csvRow["Real Qty."] || csvRow["Est. Qty."],
             });
           }
-        } else if (!csvGTIN && !shopifyBarcode) {
+        } else if (!normalizedCsvGTIN && !normalizedShopifyBarcode) {
           // Both missing barcodes
           results.matched.push({
             ...shopifyVariant,
@@ -184,7 +196,7 @@ export async function action({ request }) {
             csvQty: csvRow["Real Qty."] || csvRow["Est. Qty."],
             note: "Both CSV and Shopify missing barcode/GTIN",
           });
-        } else if (!csvGTIN) {
+        } else if (!normalizedCsvGTIN) {
           // CSV missing GTIN
           results.matched.push({
             ...shopifyVariant,
@@ -193,7 +205,7 @@ export async function action({ request }) {
             csvQty: csvRow["Real Qty."] || csvRow["Est. Qty."],
             note: "CSV missing GTIN",
           });
-        } else if (!shopifyBarcode) {
+        } else if (!normalizedShopifyBarcode) {
           // Shopify missing barcode
           results.matched.push({
             ...shopifyVariant,
@@ -464,7 +476,7 @@ export default function CSVComparison() {
                     borderRadius: "4px 4px 0 0",
                   }}
                 >
-                  Barcode Mismatches ({results.barcodeMismatch.length})
+                  Barcode Mismatches (SKU exists in both systems) ({results.barcodeMismatch.length})
                 </button>
                 <button
                   onClick={() => setSelectedTab("matched")}
@@ -478,7 +490,7 @@ export default function CSVComparison() {
                     borderRadius: "4px 4px 0 0",
                   }}
                 >
-                  Matched ({results.matched.length})
+                  Matched(SKU found but one or both systems missing barcode) ({results.matched.length})
                 </button>
                 <button
                   onClick={() => setSelectedTab("perfect")}
@@ -492,7 +504,7 @@ export default function CSVComparison() {
                     borderRadius: "4px 4px 0 0",
                   }}
                 >
-                  Perfect Matches ({results.skuFoundBarcodeMatch.length})
+                  Perfect Matches(SKU found AND barcodes match) ({results.skuFoundBarcodeMatch.length})
                 </button>
               </div>
             </s-box>
