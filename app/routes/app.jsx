@@ -24,7 +24,8 @@ export default function App() {
         <s-link href="/app/missing-barcodes">missing-barcodes</s-link>
         <s-link href="/app/missing-skus">missing-skus</s-link>
         <s-link href="/app/csv-comparison">csv-comparison</s-link>
-        
+        <s-link href="/app/add-fulfil">add-fulfil</s-link>
+        <s-link href="/app/view-fulfil-from">view-fulfil-from</s-link>
       </s-app-nav>
       <Outlet />
     </AppProvider>
