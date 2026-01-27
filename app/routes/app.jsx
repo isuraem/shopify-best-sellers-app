@@ -17,7 +17,6 @@ export default function App() {
     <AppProvider embedded apiKey={apiKey}>
       <s-app-nav>
         <s-link href="/app">Home</s-link>
-        {/* <s-link href="/app/additional">Additional page</s-link> */}
         <s-link href="/app/best-sellers">best-sellers</s-link>
         <s-link href="/app/duplicate-skus">duplicate-skus</s-link>
         <s-link href="/app/duplicate-barcodes">duplicate-barcodes</s-link>
@@ -26,6 +25,7 @@ export default function App() {
         <s-link href="/app/csv-comparison">csv-comparison</s-link>
         <s-link href="/app/add-fulfil">add-fulfil</s-link>
         <s-link href="/app/view-fulfil-from">view-fulfil-from</s-link>
+        <s-link href="/app/product-filter">product-filter</s-link>
       </s-app-nav>
       <Outlet />
     </AppProvider>
