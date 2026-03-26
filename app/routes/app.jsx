@@ -26,6 +26,7 @@ export default function App() {
         <s-link href="/app/add-fulfil">add-fulfil</s-link>
         <s-link href="/app/view-fulfil-from">view-fulfil-from</s-link>
         <s-link href="/app/product-filter">product-filter</s-link>
+        <s-link href="/app/opsengine-inventory">opsengine inventory</s-link>
       </s-app-nav>
       <Outlet />
     </AppProvider>
