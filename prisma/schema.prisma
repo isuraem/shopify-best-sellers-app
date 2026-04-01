@@ -5,12 +5,9 @@ generator client {
   provider = "prisma-client-js"
 }
 
-// Note that some adapters may set a maximum length for the String type by default, please ensure your strings are long
-// enough when changing adapters.
-// See https://www.prisma.io/docs/orm/reference/prisma-schema-reference#string for more information
 datasource db {
-  provider = "sqlite"
-  url      = "file:dev.sqlite"
+  provider = "postgresql"
+  url      = env("DATABASE_URL")
 }
 
 model Session {
@@ -29,4 +26,49 @@ model Session {
   locale        String?
   collaborator  Boolean?  @default(false)
   emailVerified Boolean?  @default(false)
+}
+
+model CustomOrder {
+  id         String   @id @default(cuid())
+
+  // Order type: "Custom Pendant" | "Custom Set" | "Custom Grillz" | "Custom Rings"
+  type       String
+
+  // Customer details
+  name       String
+  email      String
+  phone      String?
+  country    String?
+  instagram  String?
+  comments   String?
+  fileUrl    String?
+  sourcePage String?
+  sourceUrl  String?
+
+  // Pendant fields
+  pendantType   String?
+  pendantSize   String?
+  pendantColor  String?
+
+  // Chain fields (used by Custom Set)
+  chainLinkType  String?
+  chainThickness String?
+  chainLength    String?
+  chainColor     String?
+
+  // Grillz fields
+  grillzTeeth String?
+  grillzColor String?
+
+  // Ring fields
+  ringSize  String?
+  ringColor String?
+
+  submittedAt DateTime @default(now())
+  createdAt   DateTime @default(now())
+  updatedAt   DateTime @updatedAt
+
+  @@index([email])
+  @@index([type])
+  @@index([createdAt])
 }
