@@ -27,7 +27,7 @@ export default function App() {
         <s-link href="/app/view-fulfil-from">view-fulfil-from</s-link>
         <s-link href="/app/product-filter">product-filter</s-link>
         <s-link href="/app/opsengine-inventory">opsengine inventory</s-link>
-         <s-link href="/app/order-dashboard">Custom Form Orders</s-link>
+         <s-link href="/app/forms-dashboard">Custom Form Submissions</s-link>
       </s-app-nav>
       <Outlet />
     </AppProvider>
