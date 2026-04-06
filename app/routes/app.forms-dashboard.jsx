@@ -209,7 +209,7 @@ function AnalyticsCharts({ analytics }) {
                   }
                   return items[0].label;
                 },
-                label: (item) => `  ${item.raw} order${item.raw !== 1 ? "s" : ""}`,
+                label: (item) => `  ${item.raw} form submissions${item.raw !== 1 ? "s" : ""}`,
               },
             },
           },
@@ -540,7 +540,7 @@ export default function OrderDashboard() {
         <s-box padding="base" borderWidth="base" borderRadius="base" background="subdued">
           {orders.length === 0 ? (
             <div style={{ padding: "60px 24px", textAlign: "center" }}>
-              <s-text subdued>No orders found for the selected filters or date range.</s-text>
+              <s-text subdued>No form submissions found for the selected filters or date range.</s-text>
             </div>
           ) : (
             <div style={{ overflowX: "auto" }}>
