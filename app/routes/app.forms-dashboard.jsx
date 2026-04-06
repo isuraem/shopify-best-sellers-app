@@ -276,8 +276,8 @@ function AnalyticsCharts({ analytics }) {
         gap: 12, padding: "16px 20px",
         borderBottom: "1px solid #f0f2f5",
       }}>
-        <div>
-          <div style={{ fontSize: 14, fontWeight: 700, color: "#1a202c" }}>Orders over time</div>
+        <div >
+          <div style={{ fontSize: 14, fontWeight: 700, color: "#1a202c" }}>Form submissions over time</div>
           <div style={{ fontSize: 11, color: "#a0aec0", marginTop: 1 }}>Submission trends</div>
         </div>
 
@@ -455,12 +455,12 @@ export default function OrderDashboard() {
     (filters.dateFrom && filters.dateFrom !== dataStart);
 
   const kpis = [
-    { label: "Total Orders", value: totalAll, color: "#179BD7" },
+    { label: "Total Submissions", value: totalAll, color: "#179BD7" },
     ...stats.map(s => ({ label: s.type, value: s._count.id, color: TYPE_COLORS[s.type] ?? "#888" })),
   ];
 
   return (
-    <s-page heading="Custom Orders Dashboard">
+    <s-page heading="Custom Form Submissions Dashboard">
       <s-section>
 
         {/* Banner */}
@@ -468,7 +468,7 @@ export default function OrderDashboard() {
           <div style={{ background: "#fffbeb", border: "1px solid #fcd34d", borderLeft: "4px solid #f59e0b", borderRadius: 8, padding: "12px 16px", display: "flex", gap: 10, alignItems: "flex-start" }}>
             <span style={{ fontSize: 18, lineHeight: 1.3 }}>📅</span>
             <div style={{ fontSize: 13, color: "#78350f", lineHeight: 1.7 }}>
-              <strong>Order data is available from April 1, 2026 onwards.</strong>
+              <strong>Form submissions data is available from April 1, 2026 onwards.</strong>
               {" "}The date filter is blocked before <strong>Apr 1, 2026</strong>.
             </div>
           </div>
@@ -476,7 +476,7 @@ export default function OrderDashboard() {
 
         {/* KPI cards */}
         <s-box marginBottom="base">
-          <div style={{ display: "flex", gap: 14, flexWrap: "wrap" }}>
+          <div style={{ display: "flex", gap: 14, flexWrap: "wrap", marginTop: "10px" }}>
             {kpis.map(({ label, value, color }) => (
               <div key={label} style={{ background: "#fff", borderRadius: 10, padding: "18px 24px", flex: "1 1 160px", minWidth: 140, borderTop: `4px solid ${color}`, boxShadow: "0 1px 4px rgba(0,0,0,0.08)" }}>
                 <div style={{ fontSize: 28, fontWeight: 800, color }}>{value}</div>
@@ -584,7 +584,7 @@ export default function OrderDashboard() {
 
         {orders.length > 0 && (
           <s-box marginTop="base" style={{ textAlign: "center" }}>
-            <s-text subdued size="small">💡 Click any row to view full order details</s-text>
+            <s-text subdued size="small">💡 Click any row to view full form submission details</s-text>
           </s-box>
         )}
 
