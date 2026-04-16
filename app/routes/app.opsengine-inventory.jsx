@@ -151,18 +151,26 @@ export async function loader({ request }) {
             node {
               id
               createdAt
-              lineItems(first: 250) {
-                edges {
-                  node {
-                    variant {
-                      id
+              cancelledAt
+              fulfillments {
+                location {
+                  id
+                }
+                fulfillmentLineItems(first: 250) {
+                  edges {
+                    node {
+                      quantity
+                      lineItem {
+                        variant {
+                          id
+                        }
+                      }
                     }
-                    quantity
-                    refundableQuantity
                   }
                 }
               }
               refunds {
+                createdAt
                 refundLineItems(first: 250) {
                   edges {
                     node {
@@ -189,6 +197,8 @@ export async function loader({ request }) {
     // We'll accumulate gross sales and refunds separately, then compute net
     const refunded90 = {};
     const refunded30 = {};
+    // Per-variant order details for analysis panel
+    const ordersByVariant = {}; // variantId → [{orderId, createdAt, qty}]
 
     while (hasNextOrderPage) {
       const ordersResponse = await admin.graphql(ORDERS_QUERY, {
@@ -209,22 +219,36 @@ export async function loader({ request }) {
 
       for (const orderEdge of orders) {
         const order = orderEdge.node;
+
+        // Fix 1: skip cancelled orders — they are not real sales
+        if (order.cancelledAt) continue;
+
         const orderDate = new Date(order.createdAt);
         const isWithin30 = orderDate >= date30;
 
-        // ── Gross sold ──
-        for (const liEdge of order.lineItems?.edges || []) {
-          const li = liEdge.node;
-          const vid = li.variant?.id;
-          if (!vid || !variantIds.has(vid)) continue;
+        // Fix 2: count only units fulfilled from the opsengine location
+        for (const fulfillment of order.fulfillments || []) {
+          if (fulfillment.location?.id !== location.id) continue;
 
-          const qty = li.quantity || 0;
-          grossSold90[vid] = (grossSold90[vid] || 0) + qty;
-          if (isWithin30) grossSold30[vid] = (grossSold30[vid] || 0) + qty;
+          for (const fliEdge of fulfillment.fulfillmentLineItems?.edges || []) {
+            const fli = fliEdge.node;
+            const vid = fli.lineItem?.variant?.id;
+            if (!vid || !variantIds.has(vid)) continue;
+
+            const qty = fli.quantity || 0;
+            grossSold90[vid] = (grossSold90[vid] || 0) + qty;
+            if (isWithin30) grossSold30[vid] = (grossSold30[vid] || 0) + qty;
+            // Collect per-order detail for analysis panel
+            if (!ordersByVariant[vid]) ordersByVariant[vid] = [];
+            ordersByVariant[vid].push({ orderId: order.id, createdAt: order.createdAt, qty });
+          }
         }
 
-        // ── Refunded ──
+        // Fix 3: bucket refunds by refund date, not order date
         for (const refund of order.refunds || []) {
+          const refundDate = new Date(refund.createdAt);
+          const refundWithin30 = refundDate >= date30;
+
           for (const rliEdge of refund.refundLineItems?.edges || []) {
             const rli = rliEdge.node;
             const vid = rli.lineItem?.variant?.id;
@@ -232,7 +256,7 @@ export async function loader({ request }) {
 
             const qty = rli.quantity || 0;
             refunded90[vid] = (refunded90[vid] || 0) + qty;
-            if (isWithin30) refunded30[vid] = (refunded30[vid] || 0) + qty;
+            if (refundWithin30) refunded30[vid] = (refunded30[vid] || 0) + qty;
           }
         }
       }
@@ -261,6 +285,7 @@ export async function loader({ request }) {
     return {
       success: true,
       items: result,
+      ordersByVariant,
       locationName: location.name,
       locationId: location.id,
       totalItems: result.length,
@@ -285,6 +310,7 @@ export default function OpsengineInventory() {
   const [searchInput, setSearchInput] = useState("");
   const [sortConfig, setSortConfig] = useState({ key: null, direction: "desc" });
   const [filterZeroInventory, setFilterZeroInventory] = useState(false);
+  const [analysisItem, setAnalysisItem] = useState(null); // item selected for order analysis
 
   // Derived filtered + sorted list
   const [displayItems, setDisplayItems] = useState([]);
@@ -518,6 +544,15 @@ export default function OpsengineInventory() {
                   </s-text>
                 </s-box>
 
+                {/* ── Order Analysis Panel ── */}
+                {analysisItem && (
+                  <OrderAnalysisPanel
+                    item={analysisItem}
+                    orders={data.ordersByVariant?.[analysisItem.variantId] || []}
+                    onClose={() => setAnalysisItem(null)}
+                  />
+                )}
+
                 <div style={{ overflowX: "auto" }}>
                   <table style={{ width: "100%", borderCollapse: "collapse", backgroundColor: "white", fontSize: "13px" }}>
                     <thead>
@@ -528,6 +563,7 @@ export default function OpsengineInventory() {
                         <Th label="Net Sold (30d)" sortKey="netSales30" sortConfig={sortConfig} onSort={handleSort} minWidth="120px" align="right" />
                         <Th label="Net Sold (90d)" sortKey="netSales90" sortConfig={sortConfig} onSort={handleSort} minWidth="120px" align="right" />
                         <Th label="Available" sortKey="availableInventory" sortConfig={sortConfig} onSort={handleSort} minWidth="100px" align="right" />
+                        <th style={{ padding: "10px 12px", fontWeight: "700", fontSize: "12px", color: "#374151", whiteSpace: "nowrap" }}>Orders</th>
                       </tr>
                     </thead>
                     <tbody>
@@ -552,6 +588,24 @@ export default function OpsengineInventory() {
                             }}>
                               {item.availableInventory}
                             </span>
+                          </td>
+                          <td style={{ padding: "10px 12px", textAlign: "center" }}>
+                            <button
+                              onClick={() => setAnalysisItem(analysisItem?.variantId === item.variantId ? null : item)}
+                              title="View order analysis"
+                              style={{
+                                padding: "4px 10px",
+                                backgroundColor: analysisItem?.variantId === item.variantId ? "#1d4ed8" : "#eff6ff",
+                                color: analysisItem?.variantId === item.variantId ? "white" : "#1d4ed8",
+                                border: "1px solid #bfdbfe",
+                                borderRadius: "5px",
+                                fontSize: "13px",
+                                cursor: "pointer",
+                                fontWeight: "600",
+                              }}
+                            >
+                              📊
+                            </button>
                           </td>
                         </tr>
                       ))}
@@ -623,5 +677,169 @@ function SalesCell({ value }) {
         <span style={{ color: "#d1d5db" }}>0</span>
       )}
     </td>
+  );
+}
+
+// ─────────────────────────────────────────────
+// Order Analysis Panel
+// ─────────────────────────────────────────────
+function OrderAnalysisPanel({ item, orders, onClose }) {
+  // Group orders by calendar day
+  const byDay = {};
+  for (const o of orders) {
+    const day = o.createdAt.slice(0, 10); // YYYY-MM-DD
+    if (!byDay[day]) byDay[day] = { orderCount: 0, itemCount: 0, orders: [] };
+    byDay[day].orderCount += 1;
+    byDay[day].itemCount += o.qty;
+    byDay[day].orders.push(o);
+  }
+
+  // Sort days descending
+  const days = Object.entries(byDay).sort((a, b) => b[0].localeCompare(a[0]));
+
+  // Sort individual orders newest first
+  const sortedOrders = [...orders].sort((a, b) =>
+    b.createdAt.localeCompare(a.createdAt)
+  );
+
+  const formatOrderId = (gid) => {
+    const num = gid.split("/").pop();
+    return `#${num}`;
+  };
+
+  const totalOrders = orders.length;
+  const totalItems = orders.reduce((s, o) => s + o.qty, 0);
+  const avgPerOrder = totalOrders > 0 ? (totalItems / totalOrders).toFixed(1) : "0";
+
+  return (
+    <div style={{
+      margin: "0 0 16px 0",
+      border: "2px solid #1d4ed8",
+      borderRadius: "10px",
+      backgroundColor: "#eff6ff",
+      overflow: "hidden",
+    }}>
+      {/* Header */}
+      <div style={{
+        display: "flex", justifyContent: "space-between", alignItems: "flex-start",
+        padding: "14px 16px", backgroundColor: "#1d4ed8", color: "white",
+      }}>
+        <div>
+          <div style={{ fontWeight: "800", fontSize: "14px" }}>
+            📊 Order Analysis — {item.productTitle}
+          </div>
+          <div style={{ fontSize: "12px", opacity: 0.85, marginTop: "2px" }}>
+            SKU: {item.sku} &nbsp;·&nbsp; {item.variantTitle}
+          </div>
+        </div>
+        <button
+          onClick={onClose}
+          style={{
+            background: "rgba(255,255,255,0.2)", border: "none", color: "white",
+            borderRadius: "5px", padding: "4px 10px", cursor: "pointer",
+            fontSize: "13px", fontWeight: "700",
+          }}
+        >
+          ✕ Close
+        </button>
+      </div>
+
+      {orders.length === 0 ? (
+        <div style={{ padding: "24px", textAlign: "center", color: "#6b7280", fontSize: "13px" }}>
+          No fulfilled orders found for this variant in the last 90 days.
+        </div>
+      ) : (
+        <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: "0" }}>
+
+          {/* ── Left: Daily breakdown ── */}
+          <div style={{ padding: "14px 16px", borderRight: "1px solid #bfdbfe" }}>
+            <div style={{ fontWeight: "700", fontSize: "12px", color: "#1d4ed8", marginBottom: "10px", textTransform: "uppercase", letterSpacing: "0.5px" }}>
+              Daily Breakdown (90 days)
+            </div>
+            {/* Summary pills */}
+            <div style={{ display: "flex", gap: "8px", marginBottom: "12px", flexWrap: "wrap" }}>
+              <Pill label="Total Orders" value={totalOrders} color="#1d4ed8" />
+              <Pill label="Total Items" value={totalItems} color="#059669" />
+              <Pill label="Avg / Order" value={avgPerOrder} color="#7c3aed" />
+            </div>
+            <div style={{ overflowY: "auto", maxHeight: "280px" }}>
+              <table style={{ width: "100%", borderCollapse: "collapse", fontSize: "12px" }}>
+                <thead>
+                  <tr style={{ backgroundColor: "#dbeafe", position: "sticky", top: 0 }}>
+                    <th style={{ padding: "7px 10px", textAlign: "left", fontWeight: "700", color: "#1e3a8a" }}>Date</th>
+                    <th style={{ padding: "7px 10px", textAlign: "right", fontWeight: "700", color: "#1e3a8a" }}>Orders</th>
+                    <th style={{ padding: "7px 10px", textAlign: "right", fontWeight: "700", color: "#1e3a8a" }}>Items Sold</th>
+                    <th style={{ padding: "7px 10px", textAlign: "right", fontWeight: "700", color: "#1e3a8a" }}>Avg / Order</th>
+                  </tr>
+                </thead>
+                <tbody>
+                  {days.map(([day, stats], i) => (
+                    <tr key={day} style={{ backgroundColor: i % 2 === 0 ? "white" : "#f0f9ff", borderBottom: "1px solid #e0f2fe" }}>
+                      <td style={{ padding: "7px 10px", fontWeight: "600", color: "#1e3a8a" }}>
+                        {new Date(day + "T00:00:00").toLocaleDateString(undefined, { weekday: "short", month: "short", day: "numeric" })}
+                      </td>
+                      <td style={{ padding: "7px 10px", textAlign: "right", fontWeight: "700", color: "#1d4ed8" }}>{stats.orderCount}</td>
+                      <td style={{ padding: "7px 10px", textAlign: "right", fontWeight: "700", color: "#059669" }}>
+                        <span style={{ backgroundColor: "#d1fae5", padding: "2px 6px", borderRadius: "4px" }}>{stats.itemCount}</span>
+                      </td>
+                      <td style={{ padding: "7px 10px", textAlign: "right", color: "#6b7280" }}>
+                        {(stats.itemCount / stats.orderCount).toFixed(1)}
+                      </td>
+                    </tr>
+                  ))}
+                </tbody>
+              </table>
+            </div>
+          </div>
+
+          {/* ── Right: Individual orders ── */}
+          <div style={{ padding: "14px 16px" }}>
+            <div style={{ fontWeight: "700", fontSize: "12px", color: "#1d4ed8", marginBottom: "10px", textTransform: "uppercase", letterSpacing: "0.5px" }}>
+              Individual Orders (newest first)
+            </div>
+            <div style={{ overflowY: "auto", maxHeight: "322px" }}>
+              <table style={{ width: "100%", borderCollapse: "collapse", fontSize: "12px" }}>
+                <thead>
+                  <tr style={{ backgroundColor: "#dbeafe", position: "sticky", top: 0 }}>
+                    <th style={{ padding: "7px 10px", textAlign: "left", fontWeight: "700", color: "#1e3a8a" }}>Order</th>
+                    <th style={{ padding: "7px 10px", textAlign: "left", fontWeight: "700", color: "#1e3a8a" }}>Date &amp; Time</th>
+                    <th style={{ padding: "7px 10px", textAlign: "right", fontWeight: "700", color: "#1e3a8a" }}>Qty</th>
+                  </tr>
+                </thead>
+                <tbody>
+                  {sortedOrders.map((o, i) => (
+                    <tr key={o.orderId + i} style={{ backgroundColor: i % 2 === 0 ? "white" : "#f0f9ff", borderBottom: "1px solid #e0f2fe" }}>
+                      <td style={{ padding: "7px 10px", fontFamily: "monospace", fontWeight: "700", color: "#1d4ed8" }}>
+                        {formatOrderId(o.orderId)}
+                      </td>
+                      <td style={{ padding: "7px 10px", color: "#374151" }}>
+                        {new Date(o.createdAt).toLocaleString(undefined, { month: "short", day: "numeric", hour: "2-digit", minute: "2-digit" })}
+                      </td>
+                      <td style={{ padding: "7px 10px", textAlign: "right", fontWeight: "700" }}>
+                        <span style={{ backgroundColor: "#fef3c7", padding: "2px 8px", borderRadius: "4px", color: "#92400e" }}>{o.qty}</span>
+                      </td>
+                    </tr>
+                  ))}
+                </tbody>
+              </table>
+            </div>
+          </div>
+
+        </div>
+      )}
+    </div>
+  );
+}
+
+function Pill({ label, value, color }) {
+  return (
+    <div style={{
+      display: "flex", flexDirection: "column", alignItems: "center",
+      padding: "6px 12px", backgroundColor: "white", borderRadius: "8px",
+      border: `1px solid ${color}20`, minWidth: "70px",
+    }}>
+      <span style={{ fontSize: "16px", fontWeight: "800", color }}>{value}</span>
+      <span style={{ fontSize: "10px", color: "#9ca3af", fontWeight: "600", textTransform: "uppercase" }}>{label}</span>
+    </div>
   );
 }
