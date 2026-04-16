@@ -151,18 +151,26 @@ export async function loader({ request }) {
             node {
               id
               createdAt
-              lineItems(first: 250) {
-                edges {
-                  node {
-                    variant {
-                      id
+              cancelledAt
+              fulfillments {
+                location {
+                  id
+                }
+                fulfillmentLineItems(first: 250) {
+                  edges {
+                    node {
+                      quantity
+                      lineItem {
+                        variant {
+                          id
+                        }
+                      }
                     }
-                    quantity
-                    refundableQuantity
                   }
                 }
               }
               refunds {
+                createdAt
                 refundLineItems(first: 250) {
                   edges {
                     node {
@@ -209,22 +217,33 @@ export async function loader({ request }) {
 
       for (const orderEdge of orders) {
         const order = orderEdge.node;
+
+        // Fix 1: skip cancelled orders — they are not real sales
+        if (order.cancelledAt) continue;
+
         const orderDate = new Date(order.createdAt);
         const isWithin30 = orderDate >= date30;
 
-        // ── Gross sold ──
-        for (const liEdge of order.lineItems?.edges || []) {
-          const li = liEdge.node;
-          const vid = li.variant?.id;
-          if (!vid || !variantIds.has(vid)) continue;
+        // Fix 2: count only units fulfilled from the opsengine location
+        for (const fulfillment of order.fulfillments || []) {
+          if (fulfillment.location?.id !== location.id) continue;
 
-          const qty = li.quantity || 0;
-          grossSold90[vid] = (grossSold90[vid] || 0) + qty;
-          if (isWithin30) grossSold30[vid] = (grossSold30[vid] || 0) + qty;
+          for (const fliEdge of fulfillment.fulfillmentLineItems?.edges || []) {
+            const fli = fliEdge.node;
+            const vid = fli.lineItem?.variant?.id;
+            if (!vid || !variantIds.has(vid)) continue;
+
+            const qty = fli.quantity || 0;
+            grossSold90[vid] = (grossSold90[vid] || 0) + qty;
+            if (isWithin30) grossSold30[vid] = (grossSold30[vid] || 0) + qty;
+          }
         }
 
-        // ── Refunded ──
+        // Fix 3: bucket refunds by refund date, not order date
         for (const refund of order.refunds || []) {
+          const refundDate = new Date(refund.createdAt);
+          const refundWithin30 = refundDate >= date30;
+
           for (const rliEdge of refund.refundLineItems?.edges || []) {
             const rli = rliEdge.node;
             const vid = rli.lineItem?.variant?.id;
@@ -232,7 +251,7 @@ export async function loader({ request }) {
 
             const qty = rli.quantity || 0;
             refunded90[vid] = (refunded90[vid] || 0) + qty;
-            if (isWithin30) refunded30[vid] = (refunded30[vid] || 0) + qty;
+            if (refundWithin30) refunded30[vid] = (refunded30[vid] || 0) + qty;
           }
         }
       }
