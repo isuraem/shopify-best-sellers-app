@@ -150,6 +150,7 @@ export async function loader({ request }) {
           edges {
             node {
               id
+              name
               createdAt
               cancelledAt
               fulfillments {
@@ -240,7 +241,7 @@ export async function loader({ request }) {
             if (isWithin30) grossSold30[vid] = (grossSold30[vid] || 0) + qty;
             // Collect per-order detail for analysis panel
             if (!ordersByVariant[vid]) ordersByVariant[vid] = [];
-            ordersByVariant[vid].push({ orderId: order.id, createdAt: order.createdAt, qty });
+            ordersByVariant[vid].push({ orderId: order.id, orderName: order.name, createdAt: order.createdAt, qty });
           }
         }
 
@@ -702,10 +703,7 @@ function OrderAnalysisPanel({ item, orders, onClose }) {
     b.createdAt.localeCompare(a.createdAt)
   );
 
-  const formatOrderId = (gid) => {
-    const num = gid.split("/").pop();
-    return `#${num}`;
-  };
+  const formatOrderId = (o) => o.orderName || `#${o.orderId.split("/").pop()}`;
 
   const totalOrders = orders.length;
   const totalItems = orders.reduce((s, o) => s + o.qty, 0);
@@ -810,7 +808,7 @@ function OrderAnalysisPanel({ item, orders, onClose }) {
                   {sortedOrders.map((o, i) => (
                     <tr key={o.orderId + i} style={{ backgroundColor: i % 2 === 0 ? "white" : "#f0f9ff", borderBottom: "1px solid #e0f2fe" }}>
                       <td style={{ padding: "7px 10px", fontFamily: "monospace", fontWeight: "700", color: "#1d4ed8" }}>
-                        {formatOrderId(o.orderId)}
+                        {formatOrderId(o)}
                       </td>
                       <td style={{ padding: "7px 10px", color: "#374151" }}>
                         {new Date(o.createdAt).toLocaleString(undefined, { month: "short", day: "numeric", hour: "2-digit", minute: "2-digit" })}
