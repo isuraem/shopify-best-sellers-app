@@ -153,19 +153,12 @@ export async function loader({ request }) {
               name
               createdAt
               cancelledAt
-              fulfillments {
-                location {
-                  id
-                }
-                fulfillmentLineItems(first: 250) {
-                  edges {
-                    node {
-                      quantity
-                      lineItem {
-                        variant {
-                          id
-                        }
-                      }
+              lineItems(first: 250) {
+                edges {
+                  node {
+                    quantity
+                    variant {
+                      id
                     }
                   }
                 }
@@ -227,22 +220,18 @@ export async function loader({ request }) {
         const orderDate = new Date(order.createdAt);
         const isWithin30 = orderDate >= date30;
 
-        // Fix 2: count only units fulfilled from the opsengine location
-        for (const fulfillment of order.fulfillments || []) {
-          if (fulfillment.location?.id !== location.id) continue;
+        // Count all line items from non-cancelled orders (includes unfulfilled orders
+        // where tracking may not have been added)
+        for (const liEdge of order.lineItems?.edges || []) {
+          const li = liEdge.node;
+          const vid = li.variant?.id;
+          if (!vid || !variantIds.has(vid)) continue;
 
-          for (const fliEdge of fulfillment.fulfillmentLineItems?.edges || []) {
-            const fli = fliEdge.node;
-            const vid = fli.lineItem?.variant?.id;
-            if (!vid || !variantIds.has(vid)) continue;
-
-            const qty = fli.quantity || 0;
-            grossSold90[vid] = (grossSold90[vid] || 0) + qty;
-            if (isWithin30) grossSold30[vid] = (grossSold30[vid] || 0) + qty;
-            // Collect per-order detail for analysis panel
-            if (!ordersByVariant[vid]) ordersByVariant[vid] = [];
-            ordersByVariant[vid].push({ orderId: order.id, orderName: order.name, createdAt: order.createdAt, qty });
-          }
+          const qty = li.quantity || 0;
+          grossSold90[vid] = (grossSold90[vid] || 0) + qty;
+          if (isWithin30) grossSold30[vid] = (grossSold30[vid] || 0) + qty;
+          if (!ordersByVariant[vid]) ordersByVariant[vid] = [];
+          ordersByVariant[vid].push({ orderId: order.id, orderName: order.name, createdAt: order.createdAt, qty });
         }
 
         // Fix 3: bucket refunds by refund date, not order date
