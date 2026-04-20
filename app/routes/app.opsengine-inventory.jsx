@@ -153,6 +153,7 @@ export async function loader({ request }) {
               name
               createdAt
               cancelledAt
+              displayFinancialStatus
               lineItems(first: 250) {
                 edges {
                   node {
@@ -214,8 +215,10 @@ export async function loader({ request }) {
       for (const orderEdge of orders) {
         const order = orderEdge.node;
 
-        // Fix 1: skip cancelled orders — they are not real sales
+        // Skip cancelled or unpaid orders — not real completed sales
         if (order.cancelledAt) continue;
+        const fs = order.displayFinancialStatus;
+        if (fs === "PENDING" || fs === "VOIDED" || fs === "PARTIALLY_PAID") continue;
 
         const orderDate = new Date(order.createdAt);
         const isWithin30 = orderDate >= date30;
