@@ -176,7 +176,7 @@ export const action = async ({ request }) => {
     hasNextPage = pageInfo.hasNextPage;
     cursor = pageInfo.endCursor;
   }
-
+  console.log(`[backfill] Complete. Processed ${processed} products.`);
   return { processed };
 };
 
