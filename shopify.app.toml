@@ -19,9 +19,17 @@ api_version = "2026-01"
   topics = [ "app/scopes_update" ]
   uri = "/webhooks/app/scopes_update"
 
+  [[webhooks.subscriptions]]
+  topics = [ "products/update" ]
+  uri = "/webhooks/products/update"
+
+  [[webhooks.subscriptions]]
+  topics = [ "products/create" ]
+  uri = "/webhooks/products/create"
+
 [access_scopes]
 # Learn more at https://shopify.dev/docs/apps/tools/cli/configuration#access_scopes
-scopes = "read_products,read_orders,read_all_orders, write_products,write_inventory,read_locations"
+scopes = "read_products,read_orders,read_all_orders, write_products,write_inventory,read_locations,read_metaobjects,write_metaobjects"
 use_legacy_install_flow = false
 [auth]
 redirect_urls = [ "https://shopify-best-sellers-app-production.up.railway.app/api/auth" ]
