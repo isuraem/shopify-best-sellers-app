@@ -1,6 +1,7 @@
 import { useLoaderData, useNavigate } from "react-router";
 import { authenticate } from "../shopify.server";
 import { useState, useEffect } from "react";
+import { useFetcher } from "react-router";
 
 export const loader = async ({ request }) => {
   const { admin } = await authenticate.admin(request);
@@ -124,6 +125,61 @@ export const loader = async ({ request }) => {
   };
 };
 
+export const action = async ({ request }) => {
+  const { admin } = await authenticate.admin(request);
+
+  let hasNextPage = true;
+  let cursor = null;
+  let processed = 0;
+
+  while (hasNextPage) {
+    const response = await admin.graphql(`
+      query getProducts($cursor: String) {
+        products(first: 50, after: $cursor) {
+          pageInfo { hasNextPage endCursor }
+          nodes {
+            id
+            media(first: 250) {
+              nodes { id }
+            }
+          }
+        }
+      }
+    `, { variables: { cursor } });
+
+    const data = await response.json();
+    const { nodes, pageInfo } = data.data.products;
+
+    for (const product of nodes) {
+      const mediaGIDs = product.media.nodes.map(n => n.id);
+      await admin.graphql(`
+        mutation setMediaSnapshot($metafields: [MetafieldsSetInput!]!) {
+          metafieldsSet(metafields: $metafields) {
+            userErrors { field message }
+          }
+        }
+      `, {
+        variables: {
+          metafields: [{
+            ownerId: product.id,
+            namespace: "app_ic",
+            key: "media_snapshot",
+            type: "json",
+            value: JSON.stringify(mediaGIDs)
+          }]
+        }
+      });
+      processed++;
+      await new Promise(r => setTimeout(r, 200));
+    }
+
+    hasNextPage = pageInfo.hasNextPage;
+    cursor = pageInfo.endCursor;
+  }
+
+  return { processed };
+};
+
 export default function Index() {
   const { collection, productCount, pageInfo, allCollections, selectedCollectionId } = useLoaderData();
   const navigate = useNavigate();
@@ -156,6 +212,10 @@ export default function Index() {
   const getCollectionType = (coll) => {
     return coll.ruleSet ? " (Smart)" : " (Manual)";
   };
+
+  const fetcher = useFetcher();
+  const isRunning = fetcher.state !== "idle";
+  const result = fetcher.data;
 
   return (
     <s-page heading="Best Sellers Overview">
@@ -276,6 +336,16 @@ export default function Index() {
             </>
           )}
         </s-section>
+      )}
+
+      <fetcher.Form method="post">
+        <button type="submit" disabled={isRunning}>
+          {isRunning ? "Running backfill..." : "Backfill Media Snapshots"}
+        </button>
+      </fetcher.Form>
+
+      {fetcher.data && (
+        <p>Done! Processed {fetcher.data.processed} products.</p>
       )}
     </s-page>
   );
