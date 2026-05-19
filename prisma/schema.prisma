@@ -72,3 +72,19 @@ model CustomOrder {
   @@index([type])
   @@index([createdAt])
 }
+
+model VariantAutoSetup {
+  id         String   @id @default(cuid())
+  shop       String
+  productId  String
+  variantId  String
+  sku        String?
+  stockAdded Boolean  @default(false)
+  changes    String?
+  trigger    String   // "products/create" | "products/update"
+  createdAt  DateTime @default(now())
+
+  @@index([shop])
+  @@index([variantId])
+  @@index([createdAt])
+}
