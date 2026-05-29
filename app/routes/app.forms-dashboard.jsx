@@ -426,6 +426,61 @@ function OrderDrawer({ order, onClose }) {
   );
 }
 
+// ── Pagination ────────────────────────────────────────────────────────────────
+function Pagination({ page, totalPages, filters, dataStart, todayStr, navigate }) {
+  const goTo = (p) =>
+    navigate(`?page=${p}&type=${filters.type}&search=${filters.search}&dateFrom=${filters.dateFrom || dataStart}&dateTo=${filters.dateTo || todayStr}`);
+
+  const pages = [];
+  const delta = 2;
+  const left  = Math.max(2, page - delta);
+  const right = Math.min(totalPages - 1, page + delta);
+
+  pages.push(1);
+  if (left > 2) pages.push("...");
+  for (let p = left; p <= right; p++) pages.push(p);
+  if (right < totalPages - 1) pages.push("...");
+  if (totalPages > 1) pages.push(totalPages);
+
+  const btnBase = {
+    display: "inline-flex", alignItems: "center", justifyContent: "center",
+    minWidth: 34, height: 34, borderRadius: 6, fontSize: 13, fontWeight: 600,
+    border: "1px solid #e0e4ea", cursor: "pointer", padding: "0 8px",
+    textDecoration: "none", transition: "all 0.12s",
+  };
+
+  return (
+    <div style={{ padding: "14px 20px", borderTop: "1px solid #f0f2f5", display: "flex", gap: 4, justifyContent: "center", alignItems: "center", flexWrap: "wrap" }}>
+      {/* Prev */}
+      <button
+        onClick={() => goTo(page - 1)} disabled={page === 1}
+        style={{ ...btnBase, background: page === 1 ? "#f9fafb" : "#fff", color: page === 1 ? "#c0c8d2" : "#444", cursor: page === 1 ? "default" : "pointer" }}
+      >‹</button>
+
+      {pages.map((p, i) =>
+        p === "..." ? (
+          <span key={`ellipsis-${i}`} style={{ padding: "0 6px", color: "#aaa", fontSize: 14, lineHeight: "34px" }}>…</span>
+        ) : (
+          <button
+            key={p} onClick={() => goTo(p)}
+            style={{ ...btnBase, background: p === page ? "#179BD7" : "#fff", color: p === page ? "#fff" : "#444", borderColor: p === page ? "#179BD7" : "#e0e4ea" }}
+          >{p}</button>
+        )
+      )}
+
+      {/* Next */}
+      <button
+        onClick={() => goTo(page + 1)} disabled={page === totalPages}
+        style={{ ...btnBase, background: page === totalPages ? "#f9fafb" : "#fff", color: page === totalPages ? "#c0c8d2" : "#444", cursor: page === totalPages ? "default" : "pointer" }}
+      >›</button>
+
+      <span style={{ marginLeft: 8, fontSize: 12, color: "#a0aec0" }}>
+        Page {page} of {totalPages}
+      </span>
+    </div>
+  );
+}
+
 // ── Component ─────────────────────────────────────────────────────────────────
 export default function OrderDashboard() {
   const { orders, total, totalAll, page, totalPages, stats, filters, dataStart, analytics } = useLoaderData();
@@ -571,14 +626,7 @@ export default function OrderDashboard() {
             </div>
           )}
           {totalPages > 1 && (
-            <div style={{ padding: "14px 20px", borderTop: "1px solid #f0f2f5", display: "flex", gap: 8, justifyContent: "center" }}>
-              {Array.from({ length: totalPages }, (_, i) => i + 1).map(p => (
-                <a key={p} href="#" onClick={(e) => { e.preventDefault(); navigate(`?page=${p}&type=${filters.type}&search=${filters.search}&dateFrom=${filters.dateFrom || dataStart}&dateTo=${filters.dateTo || todayStr}`); }}
-                  style={{ display: "inline-flex", alignItems: "center", justifyContent: "center", width: 32, height: 32, borderRadius: 6, fontSize: 13, fontWeight: 600, background: p === page ? "#179BD7" : "#f0f2f5", color: p === page ? "#fff" : "#444", textDecoration: "none" }}>
-                  {p}
-                </a>
-              ))}
-            </div>
+            <Pagination page={page} totalPages={totalPages} filters={filters} dataStart={dataStart} todayStr={todayStr} navigate={navigate} />
           )}
         </s-box>
 
